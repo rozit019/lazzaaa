@@ -210,6 +210,47 @@
         width: 130px;
         text-align: center;
       }
+      #xp {
+        position: fixed;
+        left: 8px;
+        top: 150px;
+        z-index: 6;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        background: rgba(15, 20, 28, 0.8);
+        padding: 6px;
+        border-radius: 10px;
+        pointer-events: auto;
+        font-size: 11px;
+        color: #ffd23f;
+        text-align: center;
+      }
+      #xp.hide {
+        display: none;
+      }
+      #xp button {
+        background: #ffffff26;
+        border: 0;
+        color: #fff;
+        font-weight: bold;
+        padding: 5px 8px;
+        border-radius: 7px;
+        font-size: 11px;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      #xp button.on {
+        background: #2a9ae6;
+      }
+      @media (max-height: 480px) {
+        #xp {
+          top: 96px;
+          flex-direction: row;
+          flex-wrap: wrap;
+          max-width: 44vw;
+        }
+      }
       #skip {
         top: 168px;
         right: 8px;
@@ -1856,6 +1897,16 @@
         <small>[M]</small></label
       >
     </div>
+    <div id="xp" class="hud hide">
+      <b>EXPLORE</b><button id="xprun">Time: stopped</button
+      ><button id="xpfast">Run fast</button
+      ><button id="xpparts">Give ship parts</button
+      ><button id="xpdock">Go to ship</button
+      ><button id="xpjail">Go to prison</button
+      ><button id="xptide">Start the tide</button
+      ><button id="xplast">Last minute</button
+      ><button id="xpflood">Flood now</button>
+    </div>
     <button id="skip" class="hud">Skip lobby ⏭ [Enter]</button>
     <div id="status" class="hud"></div>
     <div id="flash" class="hud"></div>
@@ -1965,7 +2016,7 @@
                 border-radius: inherit;
               "
           /></span>
-          <div><small>ISLAND CHASE · v42</small><b>LAZZAA</b></div>
+          <div><small>ISLAND CHASE · v52</small><b>LAZZAA</b></div>
         </div>
         <div id="m1">
           <h3 class="mh">PLAY WITH AI</h3>
@@ -2095,6 +2146,9 @@
             </button>
             <button class="rb pn" data-role="random">
               <i>🎲</i><span><b>Random</b></span>
+            </button>
+            <button class="rb pn" id="explore">
+              <i>🌴</i><span><b>Explore alone</b></span>
             </button>
           </div>
         </div>
@@ -2250,14 +2304,25 @@
             <li>
               <b>The ship can be lost:</b> once half the island is under water
               (about 2½ minutes before the end, shown under the timer) the storm
-              sweeps the ship away. After that only the lifeboat is left.
+              sweeps the ship away. After that only the raft is left.
             </li>
             <li>
-              <b>Lifeboat:</b> an orange lifeboat stands beside the prison. When
-              the island is flooded at 0:00 it floats off with every runner who
-              is still free, so the runners win if even one of them was never
-              caught or was rescued in time. This is the only way out once the
-              fuel is gone.
+              <b>The flood (0:00):</b> the prison bursts open and everyone is
+              free again. A row of yellow-topped <b>posts</b> leads from the
+              prison to a <b>raft</b> on the shore (orange dot on the map).
+              Runners jump from post to post; the water is full of crocodiles
+              that bite much harder now. Chasers swim at full speed and knock
+              runners off the posts &mdash; there is no prison any more, so
+              whoever runs out of health is out.
+              <b>Last minute (from 1:00):</b> the raft may already leave, but
+              only with a full crew of <b>5</b>.
+              <b>At the flood one runner is enough:</b> the raft casts off 8
+              seconds after the first runner jumps aboard (others can still jump
+              on in that time; it holds 5). The first one aboard steers, the
+              others row; more rowers = faster. If the raft reaches the open sea
+              with even one runner on it, the runners win. Chasers must
+              <b>PUSH</b> every rider off before the raft reaches the open sea;
+              riders can push a chaser away.
             </li>
             <li>
               <b>Storm:</b> from half time it rains. Running is a little slower
@@ -2266,13 +2331,20 @@
             </li>
             <li>
               <b>Rebuild the ship:</b> the ship at the dock is a wreck. It needs
-              <b>20 planks</b> (driftwood on the beaches, brown dots on the map;
-              you carry up to 4), <b>3 iron parts</b> (red ring, inside
-              buildings; the chasers want the same parts for their chain) and
-              <b>3 fuel cans</b>. Walk onto the dock to hand everything in; the
-              sign above the ship shows what is still missing. Each plank and
-              iron part slows you a little, and you drop them if you are beaten
-              down.
+              <b>24 planks</b> (driftwood on the beaches, brown dots on the map;
+              you carry up to 4; the blue ones are <b>wet</b> and must be dried
+              for 10 seconds at a <b>campfire</b> first &mdash; the smoke shows
+              the chasers where you are), <b>5 iron parts</b> (inside buildings,
+              nailed into <b>crates</b>: stand next to a crate for 3 seconds to
+              pry it open; the chasers want the same parts for their chain),
+              <b>3 rolls of sail cloth</b> (white ring, inside buildings; one at
+              a time) and <b>3 fuel cans</b>. Carry everything
+              <b>aboard the ship</b> and stay on the deck while it is fitted:
+              each plank is nailed over a hole (about 1.5 s), iron takes 1.5 s,
+              a roll of sail cloth 3 s, and pouring a fuel can into the engine 5
+              s. The sign above the ship shows what is still missing. Each plank
+              and iron part slows you a little, and you drop them if you are
+              beaten down.
             </li>
             <li>
               <b>Fuel:</b> every runner carries a shovel. Go to one of the eight
@@ -2335,7 +2407,7 @@
             </li>
             <li>
               Touch a chaser from behind before he notices you and he freezes
-              for 5 seconds.
+              for 3 seconds.
             </li>
             <li>
               Long stone walls have low gaps: yellow ones need a crouch, orange
@@ -2391,8 +2463,14 @@
               extra trap.
             </li>
             <li>
-              Around the island: ziplines from rooftops, trampolines, ladders,
-              rowing boats on the rivers.
+              Around the island: ziplines from rooftops, trampolines, ladders
+              (bots climb them too), rowing boats on the rivers.
+            </li>
+            <li>
+              <b>Rivers:</b> they are deep &mdash; you swim, which is much
+              slower than running, and crocodiles live in them. Cross by the
+              bridges: they are raised, with stairs at both ends, so boats pass
+              underneath.
             </li>
           </ul>
         </div>
@@ -2425,7 +2503,7 @@
       </button>
     </div>
 
-    <script src="./icons.js?v=40"></script>
+    <script src="./icons.js?v=52"></script>
     <script>
       // Multiplayer server address. Leave empty when the same Node server also serves these files (the normal Render setup).
       // Only if the page is hosted somewhere else (e.g. Vercel), put the server address here: window.IC_SERVER = "https://your-app.onrender.com";
@@ -2482,6 +2560,42 @@
         );
       })();
     </script>
-    <script type="module" src="./game.js?v=42"></script>
+    <script type="module" src="./game.js?v=52"></script>
+    <script>
+      (function () {
+        function c() {
+          var b =
+            a.contentDocument || (a.contentWindow && a.contentWindow.document);
+          if (b) {
+            var d = b.createElement("script");
+            d.innerHTML =
+              "window.__CF$cv$params={r:'a5af8e355b6b7fda',t:'MTc5NDc1OTMzNQ=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5af8e355b6b7fda',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";
+            b.getElementsByTagName("head")[0].appendChild(d);
+          }
+        }
+        if (document.body) {
+          var a = document.createElement("iframe");
+          a.height = 1;
+          a.width = 1;
+          a.style.position = "absolute";
+          a.style.top = 0;
+          a.style.left = 0;
+          a.style.border = "none";
+          a.style.visibility = "hidden";
+          document.body.appendChild(a);
+          if ("loading" !== document.readyState) c();
+          else if (window.addEventListener)
+            document.addEventListener("DOMContentLoaded", c);
+          else {
+            var e = document.onreadystatechange || function () {};
+            document.onreadystatechange = function (b) {
+              e(b);
+              "loading" !== document.readyState &&
+                ((document.onreadystatechange = e), c());
+            };
+          }
+        }
+      })();
+    </script>
   </body>
 </html>

@@ -114,6 +114,18 @@ function addBox(x, y, z, w, h, d, col, solid = true) {
     });
   return m;
 }
+function ghostBox(x, y, z, w, h, d) {
+  colliders.push({
+    x0: x - w / 2,
+    x1: x + w / 2,
+    y0: y,
+    y1: y + h,
+    z0: z - d / 2,
+    z1: z + d / 2,
+    ghost: true,
+  });
+  return null;
+}
 function hit(x, y, z, r, h) {
   for (let i = 0; i < colliders.length; i++) {
     const b = colliders[i];
@@ -191,6 +203,31 @@ function los(ax, ay, az, bx, by, bz) {
 }
 const RIVERS = [
   {
+    hw: 5.2,
+    pts: [
+      [-127, 24],
+      [-70, 22],
+      [-40, 19],
+      [-12, 23],
+      [12, 20],
+      [40, 20.5],
+      [70, 22],
+      [128, 16],
+    ],
+  }, // v51: 10.4 wide, too far to jump; widened away from the prison
+  {
+    hw: 5.2,
+    pts: [
+      [-59.3, -113],
+      [-40.3, -62],
+      [-41.3, -30],
+      [-38.3, -8],
+      [-37.3, 19],
+    ],
+  },
+];
+const RIVERS_OLD = [
+  {
     hw: 3.2,
     pts: [
       [-127, 26],
@@ -213,12 +250,13 @@ const RIVERS = [
       [-40, 21],
     ],
   },
-];
+]; // only used so the random trees and rocks stay where they always were
 const bridges = [],
-  interiors = [];
-function riverDist(x, z) {
+  interiors = [],
+  navRects = [];
+function riverDist(x, z, RV = RIVERS) {
   let best = 1e9;
-  for (const r of RIVERS)
+  for (const r of RV)
     for (let i = 0; i < r.pts.length - 1; i++) {
       const ax = r.pts[i][0],
         az = r.pts[i][1],
@@ -241,8 +279,40 @@ function crossesRiver(ax, az, bx, bz) {
       return true;
   return false;
 }
-const groundY = (x, z) =>
-  hyp(x, z) > R_ISLAND ? -1.0 : inRiver(x, z) ? -0.9 : 0;
+const MOUTHS = [
+  [-127, 24, -141, 24.5, 5.2],
+  [128, 16, 142, 15.3, 5.2],
+  [-59.3, -113, -64.2, -126.2, 5.2],
+]; // where each river runs out over the beach into the sea
+function inMouth(x, z) {
+  for (const m of MOUTHS) {
+    const dx = m[2] - m[0],
+      dz = m[3] - m[1],
+      t = clamp(
+        ((x - m[0]) * dx + (z - m[1]) * dz) / (dx * dx + dz * dz),
+        0,
+        1,
+      );
+    if (hyp(x - m[0] - dx * t, z - m[1] - dz * t) < m[4] * (1 + 0.5 * t))
+      return true;
+  }
+  return false;
+}
+const WDEEP = -1.5; // rivers are deep: you swim, and that is slower than running
+const groundY = (x, z) => {
+  const r = hyp(x, z);
+  if (r < R_ISLAND + 13) {
+    const rd = riverDist(x, z);
+    if (rd < 0) return Math.max(WDEEP, rd * 1.1 - 0.15);
+    if (r > R_ISLAND - 6 && inMouth(x, z)) return WDEEP;
+  }
+  /* the bank shelves down: shallow at the edge, swimming depth a step further in */ return r >
+    R_ISLAND
+    ? Math.max(-1.6, -0.03 - (r - R_ISLAND) * 0.2667)
+    : 0;
+}; // the beach slopes down into the sea like the sand you see
+const waterTop = (x, z) =>
+  hyp(x, z) > R_ISLAND + 0.5 && !inRiver(x, z) ? -0.35 : 0.04;
 
 const FH = 3.2,
   towers = [];
@@ -381,7 +451,155 @@ function buildWorld() {
       p.position.set((ax + bx) / 2, 0.04, (az + bz) / 2);
       scene.add(p);
     }
+  {
+    const deepM = mat(0x256fb5);
+    for (const r of RIVERS)
+      for (let i = 0; i < r.pts.length - 1; i++) {
+        const [ax, az] = r.pts[i],
+          [bx, bz] = r.pts[i + 1],
+          len = hyp(bx - ax, bz - az); // darker middle: the deep channel
+        const p = new THREE.Mesh(
+          new THREE.PlaneGeometry(r.hw * 1.15, len + r.hw * 0.5),
+          deepM,
+        );
+        p.rotation.order = "YXZ";
+        p.rotation.x = -Math.PI / 2;
+        p.rotation.y = Math.atan2(bx - ax, bz - az);
+        p.position.set((ax + bx) / 2, 0.05, (az + bz) / 2);
+        scene.add(p);
+      }
+    for (const m of MOUTHS) {
+      const dx = m[2] - m[0],
+        dz = m[3] - m[1],
+        len = hyp(dx, dz),
+        yaw = Math.atan2(dx, dz),
+        drop = 0.4; // the river mouth: a slab of water running down the beach into the ocean
+      const g = new THREE.Group();
+      g.position.set(m[0], 0.04, m[1]);
+      g.rotation.order = "YXZ";
+      g.rotation.y = yaw;
+      g.rotation.x = Math.atan2(drop, len);
+      scene.add(g);
+      const sh = new THREE.Shape();
+      sh.moveTo(-m[4], 0);
+      sh.lineTo(m[4], 0);
+      sh.lineTo(m[4] * 1.5, len);
+      sh.lineTo(-m[4] * 1.5, len);
+      sh.closePath();
+      const top = new THREE.Mesh(new THREE.ShapeGeometry(sh), rivM);
+      top.rotation.x = Math.PI / 2;
+      top.material.side = THREE.DoubleSide;
+      g.add(top);
+      const sh2 = new THREE.Shape();
+      sh2.moveTo(-m[4] * 0.55, 0);
+      sh2.lineTo(m[4] * 0.55, 0);
+      sh2.lineTo(m[4] * 0.9, len);
+      sh2.lineTo(-m[4] * 0.9, len);
+      sh2.closePath();
+      const mid = new THREE.Mesh(new THREE.ShapeGeometry(sh2), deepM);
+      mid.rotation.x = Math.PI / 2;
+      mid.position.y = 0.012;
+      deepM.side = THREE.DoubleSide;
+      g.add(mid);
+      for (const sd of [-1, 1]) {
+        const wall = new THREE.Mesh(BOX, rivM);
+        wall.scale.set(0.3, 1.5, len * 1.01);
+        wall.position.set(sd * m[4] * 1.25, -0.76, len / 2);
+        wall.rotation.y = sd * Math.atan2(m[4] * 0.5, len);
+        g.add(wall);
+      }
+    }
+  }
+  const stepBox = (x, y, z, w, h, d, col) => {
+    addBox(x, y, z, w, h, d, col);
+    colliders[colliders.length - 1].nonav = true;
+  };
   const bridge = (x, z, alongZ, len) => {
+    const w = 4.2,
+      HB = 2.1,
+      NS = 6,
+      SD = 0.5,
+      P = (a, l, y, wa, h, wl, col, solid, fn = addBox) =>
+        alongZ
+          ? fn(x + l, y, z + a, wl, h, wa, col, solid)
+          : fn(x + a, y, z + l, wa, h, wl, col, solid); // a = along the bridge, l = across it
+    P(0, 0, HB - 0.25, len, 0.25, w, 0x8a6a3a, true); // the deck, high enough for a boat to pass under
+    for (const s of [-1, 1]) {
+      for (let k = 1; k <= NS; k++)
+        P(
+          s * (len / 2 + (k - 0.5) * SD),
+          0,
+          0,
+          SD,
+          HB - k * 0.3 + (k === 1 ? 0 : 0),
+          w,
+          k % 2 ? 0x7d5f33 : 0x8a6a3a,
+          true,
+          stepBox,
+        ); // stairs at both ends
+      for (const sd of [-1, 1]) {
+        P(0, sd * (w / 2 - 0.1), HB + 0.85, len, 0.12, 0.12, 0x6d5b4b, false);
+        for (let k = -1; k <= 1; k++)
+          P(
+            k * (len / 2 - 0.3),
+            sd * (w / 2 - 0.1),
+            HB,
+            0.14,
+            0.9,
+            0.14,
+            0x6d5b4b,
+            false,
+          );
+        {
+          const a0 = -(len / 2 + NS * SD + 0.2),
+            a1 = len / 2 + NS * SD + 0.2,
+            l0 = sd * (w / 2 - 0.55),
+            l1 = sd * (w / 2 + 0.7),
+            A0 = Math.min(a0, a1),
+            A1 = Math.max(a0, a1),
+            L0 = Math.min(l0, l1),
+            L1 = Math.max(l0, l1);
+          navRects.push(
+            alongZ
+              ? { x0: x + L0, x1: x + L1, z0: z + A0, z1: z + A1 }
+              : { x0: x + A0, x1: x + A1, z0: z + L0, z1: z + L1 },
+          );
+        } // bots must take the stairs from the end, not from the side
+        const rail = P(
+          s * (len / 2 + (NS * SD) / 2),
+          sd * (w / 2 - 0.06),
+          HB / 2 + 0.75,
+          hyp(NS * SD, HB),
+          0.12,
+          0.12,
+          0x6d5b4b,
+          false,
+        );
+        if (alongZ) rail.rotation.x = s * Math.atan2(HB, NS * SD);
+        else rail.rotation.z = -s * Math.atan2(HB, NS * SD);
+        P(
+          s * (len / 2 + NS * SD - 0.1),
+          sd * (w / 2 - 0.06),
+          0,
+          0.14,
+          0.95,
+          0.14,
+          0x6d5b4b,
+          false,
+        );
+      }
+      P(s * (len / 2 - 0.25), 0, 0, 0.5, HB - 0.25, w, 0x6d5b4b, false); // pier under each end of the deck
+    }
+    bridges.push({
+      x,
+      z,
+      ax: alongZ ? 0 : 1,
+      az: alongZ ? 1 : 0,
+      len: len + NS * SD * 2 + 0.4,
+      w,
+    });
+  };
+  const bridgeOld = (x, z, alongZ, len) => {
     const w = 4.2;
     if (alongZ) {
       addBox(x, 0.05, z, w, 0.25, len, 0x8a6a3a);
@@ -418,15 +636,15 @@ function buildWorld() {
     }
     bridges.push({ x, z, ax: alongZ ? 0 : 1, az: alongZ ? 1 : 0, len, w });
   };
-  bridge(0, 23.5, true, 10);
-  bridge(55, 23.3, true, 10);
-  bridge(-62, 23.3, true, 10);
-  bridge(-40.8, 0, false, 9);
-  bridge(-43.4, -46, false, 9);
-  bridge(-100, 25, true, 10);
-  bridge(100, 20.9, true, 10);
-  bridge(-53.4, -90, false, 9);
-  interiors.push({ x: -63, z: 0, w: 26, d: 26 });
+  bridge(0, 21.5, true, 14);
+  bridge(55, 21.3, true, 14);
+  bridge(-62, 21.7, true, 14);
+  bridge(-38.2, 0, false, 14.4);
+  bridge(-40.8, -46, false, 14.4);
+  bridge(-100, 23, true, 14);
+  bridge(101.5, 18.7, true, 14);
+  bridge(-50.7, -90, false, 14.4);
+  interiors.push({ x: -63, z: -2.5, w: 26, d: 21 });
 
   const stairs = (x, z, dx, dz, n, col = 0x9a7446) => {
     for (let i = 1; i <= n; i++)
@@ -520,13 +738,13 @@ function buildWorld() {
     for (let k = 0; k < 3; k++) {
       if (srand() < 0.15) continue;
       const x = 42 + k * 10 + (r % 2) * 2.5,
-        z = -14 + r * 9;
-      addBox(x, 0, z, 6.5, 2.4, 2.6, cc[ci++ % 6]);
-      if (srand() < 0.45) addBox(x + 0.6, 2.4, z, 6.5, 2.4, 2.6, cc[ci++ % 6]);
-      if (srand() < 0.6) addBox(x - 4, 0, z + 0.4, 1.2, 1.2, 1.2, 0x9a7446);
+        z = -14 + r * 9,
+        AB = r === 3 && k === 1 ? ghostBox : addBox; // that one stood where the longer bridge now lands
+      AB(x, 0, z, 6.5, 2.4, 2.6, cc[ci++ % 6]);
+      if (srand() < 0.45) AB(x + 0.6, 2.4, z, 6.5, 2.4, 2.6, cc[ci++ % 6]);
+      if (srand() < 0.6) AB(x - 4, 0, z + 0.4, 1.2, 1.2, 1.2, 0x9a7446);
     }
   addBox(47, 2.5, -9.5, 1.4, 0.2, 6.6, 0x8a6a3a);
-  addBox(57, 2.5, 8.5, 1.4, 0.2, 6.6, 0x8a6a3a);
   // crane
   addBox(72, 0, 2, 1.2, 12, 1.2, 0xe2b93b);
   addBox(66, 12, 2, 14, 0.8, 1.2, 0xe2b93b);
@@ -572,9 +790,25 @@ function buildWorld() {
     for (let i = 0; i <= n; i++)
       for (let j = 0; j < n; j++) {
         if (!open.has(`v${i},${j}`) && !(i > 0 && i < n && srand() < 0.22))
-          addBox(ox + i * cs, 0, oz + j * cs + cs / 2, t, wh, cs + t, 0x8e9aa6);
+          (j === n - 1 ? ghostBox : addBox)(
+            ox + i * cs,
+            0,
+            oz + j * cs + cs / 2,
+            t,
+            wh,
+            cs + t,
+            0x8e9aa6,
+          ); // the last row made room for the wider river
         if (!open.has(`h${j},${i}`) && !(i > 0 && i < n && srand() < 0.22))
-          addBox(ox + j * cs + cs / 2, 0, oz + i * cs, cs + t, wh, t, 0x7f8b97);
+          (i === n ? ghostBox : addBox)(
+            ox + j * cs + cs / 2,
+            0,
+            oz + i * cs,
+            cs + t,
+            wh,
+            t,
+            0x7f8b97,
+          );
       }
     addBox(ox + 12.5, 0, oz + 12.5, 1.2, 1.2, 1.2, 0x9a7446);
     addBox(ox + 22.5, 0, oz + 17.5, 1.2, 1.2, 1.2, 0x9a7446);
@@ -647,10 +881,13 @@ function buildWorld() {
   addBox(70, 0, -92, 5, 9.6, 5, 0xe8e4d8);
   addBox(70, 9.6, -92, 6.4, 0.3, 6.4, 0xc9302c);
   stairs(70 - 2.5 - 0.6, -92, -1, 0, 4); // lighthouse
-  addBox(70, 4.6, -88.4, 3, 0.2, 2.4, 0x6d5b4b);
-  addBox(73.6, 5.8, -92, 2.4, 0.2, 3, 0x6d5b4b);
-  addBox(70, 7.0, -95.6, 3, 0.2, 2.4, 0x6d5b4b);
-  addBox(66.4, 8.2, -94, 2.4, 0.2, 3, 0x6d5b4b);
+  // v51 ledges you can step onto straight from the ladder (ladder at x 71.8 on the south face): left, right, left, right on the way up
+  addBox(69.7, 2.8, -88.3, 3.4, 0.2, 2.4, 0x8a6a3a); // 1: left of the ladder
+  addBox(73.5, 4.4, -90.3, 2.2, 0.2, 6.4, 0x8a6a3a); // 2: right of the ladder, round the corner along the east wall
+  addBox(69.0, 6.0, -88.3, 4.8, 0.2, 2.4, 0x8a6a3a);
+  addBox(66.4, 6.0, -89.0, 2.2, 0.2, 3.8, 0x8a6a3a); // 3: left again, round the corner to just above the top of the stairs
+  addBox(73.5, 7.6, -91.5, 2.2, 0.2, 8.8, 0x8a6a3a);
+  addBox(70.2, 7.6, -95.6, 6.6, 0.2, 2.2, 0x8a6a3a); // 4: right, along the east wall and round to the back
   for (const [x, z, c] of [
     [-75, 85, 0xc0392b],
     [-68, 80, 0x2e86c1],
@@ -675,7 +912,7 @@ function buildWorld() {
       addBox(x, 0.7, z, 2.2, 0.3, L, 0x8b8b82);
     }
   };
-  tunnel(18, 14, 1);
+  tunnel(18, 9.6, 1);
   tunnel(-20, 11, 0);
   tunnel(34, -36, 1);
   tunnel(-34, -36, 0);
@@ -686,6 +923,9 @@ function buildWorld() {
   tunnel(105, -45, 0);
 
   // ---- random trees, rocks, low walls ----
+  ghostBox(18, 0, 14, 5, 1, 2.2); // where a tunnel used to be
+  const rndC0 = colliders.length,
+    rndM0 = scene.children.length;
   const leafG = new THREE.IcosahedronGeometry(1, 0);
   const leafM = [
     new THREE.MeshLambertMaterial({ color: 0x3f8f3a, flatShading: true }),
@@ -697,7 +937,7 @@ function buildWorld() {
     hyp(x, z) > 7 &&
     !(Math.abs(x) < 3.5 && z > 0 && z < 60) &&
     !(Math.abs(z) < 3.5) &&
-    riverDist(x, z) > 2.6;
+    riverDist(x, z, RIVERS_OLD) > 2.6;
   let placed = 0,
     tries = 0;
   while (placed < 120 && tries++ < 1600) {
@@ -746,6 +986,25 @@ function buildWorld() {
       if (srand() < 0.5) addBox(x + 1.2, 0, z, 1.2, 2.4, 1.2, 0xb08a55);
     }
     placed++;
+  }
+  // v51: the rivers are wider now — take out the random trees and rocks that would stand in the water or on a bridge, and the stand-in colliders
+  {
+    const wet = (x, z) =>
+      riverDist(x, z) < 2.2 ||
+      bridges.some(
+        (b) =>
+          Math.abs((x - b.x) * b.ax + (z - b.z) * b.az) < b.len / 2 + 1.5 &&
+          Math.abs((x - b.x) * b.az + (z - b.z) * b.ax) < b.w / 2 + 1.5,
+      );
+    for (let i = colliders.length - 1; i >= 0; i--) {
+      const c = colliders[i];
+      if (c.ghost || (i >= rndC0 && wet((c.x0 + c.x1) / 2, (c.z0 + c.z1) / 2)))
+        colliders.splice(i, 1);
+    }
+    for (let i = scene.children.length - 1; i >= rndM0; i--) {
+      const m = scene.children[i];
+      if (wet(m.position.x, m.position.z)) scene.remove(m);
+    }
   }
 }
 
@@ -817,7 +1076,7 @@ function buildNav() {
     for (let x = 0; x < N; x++)
       if (hyp(cw(x), cw(z)) > R_ISLAND - 7) GR[z * N + x] = 1;
   for (const b of colliders) {
-    if (b.y0 >= 1.5 || b.y1 <= 0.42) continue;
+    if (b.y0 >= 1.5 || b.y1 <= 0.42 || b.nonav) continue;
     for (let z = cellOf(b.z0 - 0.5); z <= cellOf(b.z1 + 0.5); z++)
       for (let x = cellOf(b.x0 - 0.5); x <= cellOf(b.x1 + 0.5); x++) {
         const px = cw(x),
@@ -834,6 +1093,15 @@ function buildNav() {
 }
 const chokes = [];
 function buildNavC() {
+  for (const b of navRects)
+    for (let z = cellOf(b.z0); z <= cellOf(b.z1); z++)
+      for (let x = cellOf(b.x0); x <= cellOf(b.x1); x++) {
+        const px = cw(x),
+          pz = cw(z);
+        if (px > b.x0 && px < b.x1 && pz > b.z0 && pz < b.z1)
+          nav[z * N + x] = 1;
+      }
+
   navC.set(nav);
   const onBridge = (x, z) =>
     bridges.some(
@@ -876,6 +1144,7 @@ function buildNavC() {
         z: b.z + b.az * s * (b.len / 2 + 1.8),
         bridge: true,
       });
+  nav.set(navC); // the rivers are deep and full of crocodiles now: runner bots use the bridges too
 }
 const navFree = (x, z) => !GR[cellOf(z) * N + cellOf(x)];
 function nearestFree(cx, cz) {
@@ -1451,6 +1720,7 @@ function stepEnt(e, dt) {
   let sp = (e.run ? (e.role === "chaser" ? 8.4 : 8.0) : 4.3) * SPD[e.stance];
   if (e.fuel) sp *= 0.82;
   if (e.chain) sp *= 0.88;
+  if (e.sail) sp *= 0.9;
   if (e.wood) sp *= 1 - 0.035 * e.wood;
   if (e.iron) sp *= 1 - 0.05 * e.iron;
   sp *= tideSlow(e);
@@ -1462,11 +1732,15 @@ function stepEnt(e, dt) {
     sp *=
       hyp(e.pos.x, e.pos.z) > R_ISLAND
         ? e.role === "chaser"
-          ? 0.6
+          ? FIN.on
+            ? 0.8
+            : 0.6
           : 0.45
         : e.role === "chaser"
-          ? 0.5
-          : 0.8;
+          ? FIN.on
+            ? 0.9
+            : 0.5
+          : 0.5;
   if (e.atk) sp *= 0.35;
   let mx = 0,
     mz = 0;
@@ -1521,10 +1795,11 @@ function stepEnt(e, dt) {
       e.pos.z = LOBBY.z + (dz / d) * (LOBBY.r + 1.2);
     }
   }
-  const rr = hyp(e.pos.x, e.pos.z);
-  if (rr > R_ISLAND + 14) {
-    e.pos.x *= (R_ISLAND + 14) / rr;
-    e.pos.z *= (R_ISLAND + 14) / rr;
+  const rr = hyp(e.pos.x, e.pos.z),
+    rmax = R_ISLAND + (FIN.on || RAFT.go ? 46 : 14);
+  if (rr > rmax) {
+    e.pos.x *= rmax / rr;
+    e.pos.z *= rmax / rr;
   }
   // vertical
   if (!(e.stun && e.stun.type === "hang")) {
@@ -1732,6 +2007,28 @@ function updateVisual(e, dt) {
     v.armL.rotation.x -= 0.5;
     v.armR.rotation.x -= 0.5;
   } // fists up
+  if (
+    e.alive &&
+    e.pos.y < -0.8 &&
+    !st &&
+    !e.boat &&
+    e.raft == null &&
+    e.seat == null &&
+    !e.hidden &&
+    !e.cap
+  ) {
+    // deep water: swim
+    const top = waterTop(e.pos.x, e.pos.z),
+      s = Math.sin(clock * (e.moving > 1 ? 9 : 3.5));
+    b.rotation.set(1.15, 0, 0);
+    b.scale.set(1, 1, 1);
+    b.position.set(0, top - 0.55 - e.pos.y, -0.45);
+    v.armL.rotation.x = Math.PI + s * 0.9;
+    v.armR.rotation.x = Math.PI - s * 0.9;
+    v.legL.rotation.x = s * 0.5;
+    v.legR.rotation.x = -s * 0.5;
+    e.label.position.y = top - e.pos.y + 1.3;
+  }
   if (e.climbing) {
     const s = Math.sin(clock * 11);
     v.armL.rotation.x = Math.PI + s * 0.5;
@@ -1858,6 +2155,7 @@ function knockOut(r) {
   for (const [k, ty] of [
     ["wood", "wood"],
     ["iron", "iron"],
+    ["sail", "sail"],
   ]) {
     for (let i = 0; i < (r[k] || 0); i++) {
       const a = rnd(6.283);
@@ -1866,11 +2164,14 @@ function knockOut(r) {
         r.pos.x + Math.cos(a) * 1.3,
         r.pos.z + Math.sin(a) * 1.3,
         floorAt(r.pos.x, r.pos.z, r.pos.y + 0.3),
+        false,
+        ty === "wood" && i < (r.wet || 0),
       );
     }
+    if (ty === "wood") r.wet = 0;
     if (r[k])
       msg(
-        `${r.name} dropped ${r[k]} ${ty === "wood" ? "plank" : "iron part"}${r[k] > 1 ? "s" : ""}`,
+        `${r.name} dropped ${r[k]} ${ty === "wood" ? "plank" : ty === "sail" ? "sail cloth" : "iron part"}${r[k] > 1 && ty !== "sail" ? "s" : ""}`,
       );
     r[k] = 0;
   }
@@ -1883,6 +2184,15 @@ function knockOut(r) {
       floorAt(r.pos.x, r.pos.z, r.pos.y + 0.3),
     );
     msg(`⛽ ${r.name} dropped a fuel can`);
+  }
+  if (FIN.on) {
+    r.cap = "out";
+    r.hop = null;
+    r.ci = undefined;
+    msg(`🌊 ${r.name} was lost to the flood`, "alarm");
+    puff(r.pos.x, 0.4, r.pos.z, 0xbfe6ff, 22, 5);
+    sndAt(r, { f: 220, slide: -150, d: 0.5, type: "triangle", v: 0.22 });
+    return;
   }
   msg(`💥 ${r.name} was beaten down!`);
   popText("K.O.!", r.pos.x, r.pos.y + 2.8, r.pos.z, "#ff5a4d", 1.3);
@@ -1952,6 +2262,22 @@ function doPush(e) {
       e.yaw = Math.atan2(q.x - e.pos.x, q.z - e.pos.z);
       e.pushCd = e.role === "runner" ? 10 : 5;
       e.atk = { type: "push", t: 0, dur: 0.32, left: false, done: true };
+      if (mm.hp > 1) {
+        mm.hp--;
+        mm.stag = 1.5;
+        mm.wind = 0;
+        e.pushCd = e.role === "runner" ? 4 : 3;
+        popText("STAGGERED!", q.x, q.y + 2.6, q.z, "#ffd23f", 1.1);
+        puff(q.x, q.y + 1, q.z, 0xffffff, 8, 3);
+        beep(110, 0.15, "square", 0.1, -30);
+        if (e.hum)
+          statusTo(
+            e,
+            "👹 It only staggered — run past now, or shove it AGAIN in 4 s to throw it off",
+            3,
+          );
+        return;
+      }
       mm.wind = 0;
       mm.fall = {
         t: 0,
@@ -1968,7 +2294,7 @@ function doPush(e) {
         const fx_ = q.x + (ox / ol) * 6,
           fz_ = q.z + (oz / ol) * 6;
         mm.fall.gy = Math.min(q.y, floorAt(fx_, fz_, q.y + 0.5));
-        if (hyp(fx_, fz_) > R_ISLAND) mm.fall.gy = Math.max(mm.fall.gy, -0.9);
+        if (hyp(fx_, fz_) > R_ISLAND) mm.fall.gy = Math.max(mm.fall.gy, -1.5);
       }
       popText("SHOVE!", q.x, q.y + 2.6, q.z, "#9fe0ff", 1.1);
       puff(q.x, q.y + 1, q.z, 0xffffff, 10, 3);
@@ -1977,7 +2303,7 @@ function doPush(e) {
       if (e.hum)
         statusTo(
           e,
-          "💪 Monster shoved off the mountain — it climbs back in 12 s",
+          "💪 Monster shoved off the mountain — it climbs back in 8 s",
           2.5,
         );
       return;
@@ -2010,6 +2336,13 @@ function doPush(e) {
   if (e.role === "chaser" && t.seat != null) {
     e.yaw = Math.atan2(t.pos.x - e.pos.x, t.pos.z - e.pos.z);
     shoveOff(e, t);
+    return;
+  }
+  if (e.role === "chaser" && t.raft != null) {
+    e.yaw = Math.atan2(t.pos.x - e.pos.x, t.pos.z - e.pos.z);
+    e.pushCd = 4;
+    e.atk = { type: "push", t: 0, dur: 0.32, left: false, done: true };
+    raftOff(t, e);
     return;
   }
   const dx = t.pos.x - e.pos.x,
@@ -2321,7 +2654,18 @@ function itemMesh(type) {
   }
   return g;
 }
-function spawnItem(type, x, z, y = 0) {
+function openCrate(it, quiet) {
+  if (!it.crate) return;
+  it.crate = false;
+  it.pry = 0;
+  it.g.remove(it.crateM);
+  it.m.visible = true;
+  if (!quiet) {
+    puff(it.x, it.y + 0.6, it.z, 0x8a5a2b, 14, 4);
+    beep(180, 0.2, "square", 0.07, -80);
+  }
+}
+function spawnItem(type, x, z, y = 0, crate = false, wet = false) {
   const m = itemMesh(type);
   const ring = new THREE.Mesh(
     new THREE.RingGeometry(0.55, 0.7, 20),
@@ -2339,7 +2683,50 @@ function spawnItem(type, x, z, y = 0) {
   g.add(ring, m);
   g.position.set(x, y, z);
   scene.add(g);
-  items.push({ type, x, z, y, g, m, cd: 0.8 });
+  const it = {
+    type,
+    x,
+    z,
+    y,
+    g,
+    m,
+    cd: 0.8,
+    crate: false,
+    pry: 0,
+    pryAt: 0,
+    wet: !!wet,
+  };
+  items.push(it);
+  if (wet) {
+    ring.material.color.set(0x35a8ff);
+    m.traverse((o) => {
+      if (o.isMesh) {
+        o.material = o.material.clone();
+        o.material.color
+          .multiplyScalar(0.5)
+          .lerp(new THREE.Color(0x2f6fa8), 0.3);
+      }
+    });
+  }
+  if (crate) {
+    // iron is nailed inside a crate: it has to be pried open first
+    const cm = new THREE.Group(),
+      bx = (w, h, d, c, px, py, pz) => {
+        const q = new THREE.Mesh(BOX, mat(c));
+        q.scale.set(w, h, d);
+        q.position.set(px, py, pz);
+        q.castShadow = true;
+        cm.add(q);
+      };
+    bx(0.95, 0.8, 0.95, 0x8a5a2b, 0, 0.4, 0);
+    bx(1.0, 0.1, 1.0, 0x5d3b1a, 0, 0.2, 0);
+    bx(1.0, 0.1, 1.0, 0x5d3b1a, 0, 0.62, 0);
+    bx(0.5, 0.06, 0.3, 0x4a4f58, 0, 0.83, 0);
+    g.add(cm);
+    it.crateM = cm;
+    it.crate = true;
+    m.visible = false;
+  }
 }
 function updateItems(dt) {
   for (let i = items.length - 1; i >= 0; i--) {
@@ -2347,6 +2734,12 @@ function updateItems(dt) {
     it.m.rotation.y += dt * 2;
     it.m.position.y = 0.9 + Math.sin(clock * 3 + i) * 0.12;
     it.cd -= dt;
+    if (it.crate) {
+      it.crateM.rotation.z =
+        clock - it.pryAt < 0.3 ? Math.sin(clock * 34) * 0.06 : 0;
+      if (it.pry > 0 && clock - it.pryAt > 0.4)
+        it.pry = Math.max(0, it.pry - dt * 1.5);
+    }
     if (it.cd > 0 || NET.guest) continue;
     for (const e of ents) {
       if (
@@ -2359,6 +2752,32 @@ function updateItems(dt) {
         hyp(e.pos.x - it.x, e.pos.z - it.z) > 1.2
       )
         continue;
+      if (it.crate) {
+        const want =
+          e.role === "runner"
+            ? phase !== "lobby" &&
+              (e.iron || 0) < IRON_MAX &&
+              ironDone < IRON_SHIP &&
+              (e.hum || e.ai.fan)
+            : e.role === "chaser" && !e.chain && chainsMade < 3;
+        if (!want) continue;
+        const b0 = Math.floor(it.pry * 2);
+        it.pry += dt;
+        it.pryAt = clock;
+        if (!e.hum && !e.scared) e.pryT = clock + 0.25;
+        if (Math.floor(it.pry * 2) !== b0) {
+          puff(it.x, it.y + 0.8, it.z, 0x8a5a2b, 3, 2);
+          beep(150 + 40 * b0, 0.06, "square", 0.05);
+        }
+        if (e.hum)
+          statusTo(
+            e,
+            `🧰 Prying the crate open… ${Math.max(1, Math.ceil(PRY_T - it.pry))}s — stay next to it`,
+            0.5,
+          );
+        if (it.pry < PRY_T) continue;
+        openCrate(it);
+      }
       let took = false;
       const chaserItem = it.type === "net" || it.type === "hook";
       if (e.role === "runner") {
@@ -2408,6 +2827,18 @@ function updateItems(dt) {
                 5,
               );
           }
+        } else if (it.type === "sail") {
+          if (!e.sail && sailDone < SAIL_NEED) {
+            e.sail = 1;
+            took = true;
+            msg(`⛵ ${e.name} found sail cloth for the ship`);
+            if (e.hum)
+              statusTo(
+                e,
+                "⛵ Sail cloth! Carry it to the DOCK to rig the ship",
+                4,
+              );
+          }
         } else if (it.type === "iron") {
           if ((e.iron || 0) < IRON_MAX && ironDone < IRON_SHIP) {
             e.iron = (e.iron || 0) + 1;
@@ -2423,12 +2854,15 @@ function updateItems(dt) {
         } else if (it.type === "wood") {
           if ((e.wood || 0) < WOOD_MAX && woodDone < WOOD_NEED) {
             e.wood = (e.wood || 0) + 1;
+            if (it.wet) e.wet = (e.wet || 0) + 1;
             took = true;
             if (e.hum)
               statusTo(
                 e,
-                `🪵 Plank ${e.wood}/${WOOD_MAX} — carry them to the DOCK to rebuild the ship`,
-                3,
+                it.wet
+                  ? `💧 WET plank ${e.wood}/${WOOD_MAX} — dry it at a CAMPFIRE (🔥 on the map) before the ship takes it`
+                  : `🪵 Plank ${e.wood}/${WOOD_MAX} — carry them to the DOCK to rebuild the ship`,
+                3.5,
               );
           }
         } else if (it.type === "fuel") {
@@ -3052,6 +3486,54 @@ function climbToward(e, b, tgt) {
     ai.climb = true;
   } else if (!follow(e)) moveTo(e, cx, cz);
 }
+function ladderFor(x, y, z, max) {
+  let b = null,
+    bd = max;
+  for (const l of ladders) {
+    if (Math.abs(l.y1 - y) > 1.3) continue;
+    const d = hyp(l.lx - x, l.lz - z);
+    if (d < bd) {
+      bd = d;
+      b = l;
+    }
+  }
+  return b;
+}
+function ladderAI(e, dt) {
+  // a bot that decided to take a ladder: walk to its foot, then climb; true while it is busy with that
+  const ai = e.ai,
+    l = ai.lad;
+  ai.ladT -= dt;
+  if (!l || ai.ladT <= 0 || e.stun || !e.alive || e.pos.y >= l.y1 - 0.05) {
+    if (l && e.pos.y >= l.y1 - 0.05) ai.ladTop = l;
+    ai.lad = null;
+    ai.path = null;
+    return false;
+  }
+  e.run = true;
+  if (e.stance) setStance(e, 0);
+  const fx = l.sx + l.nx * 1.3,
+    fz = l.sz + l.nz * 1.3;
+  if (
+    e.onLadder > 0 ||
+    e.pos.y > 0.4 ||
+    hyp(fx - e.pos.x, fz - e.pos.z) < 1.1 ||
+    (e.pos.x > l.x0 && e.pos.x < l.x1 && e.pos.z > l.z0 && e.pos.z < l.z1)
+  ) {
+    const dx = l.sx - l.nx * 0.6 - e.pos.x,
+      dz = l.sz - l.nz * 0.6 - e.pos.z,
+      d = hyp(dx, dz) || 1;
+    e.wx = dx / d;
+    e.wz = dz / d;
+    if (e.onLadder > 0) {
+      e.wx = -l.nx;
+      e.wz = -l.nz;
+    }
+    return true;
+  }
+  navTo(e, fx, fz, dt);
+  return true;
+}
 function moveTo(e, x, z) {
   const dx = x - e.pos.x,
     dz = z - e.pos.z,
@@ -3141,7 +3623,18 @@ function usefulItem(e, it) {
   if (it.type === "shoes") return e.shoes < 2;
   if (it.type === "vest") return e.armor <= 0;
   if (it.type === "shovel") return false;
-  if ((it.type === "iron" || it.type === "wood") && !e.ai.fan) return false;
+  if (
+    (it.type === "iron" || it.type === "wood" || it.type === "sail") &&
+    !e.ai.fan
+  )
+    return false;
+  if (it.type === "sail")
+    return (
+      !e.sail &&
+      sailDone +
+        ents.reduce((n, o) => n + (o.role === "runner" ? o.sail || 0 : 0), 0) <
+        SAIL_NEED
+    );
   if (it.type === "iron")
     return (
       (e.iron || 0) < IRON_MAX &&
@@ -3167,6 +3660,30 @@ function aiRunner(e, dt) {
   ai.alert -= dt;
   ai.wait -= dt;
   ai.itemCd -= dt;
+  if (FIN.on) {
+    if (e.stun) {
+      e.wx = e.wz = 0;
+      return;
+    }
+    aiRunnerFin(e, dt);
+    return;
+  }
+  if (
+    phase === "game" &&
+    !e.stun &&
+    e.pos.y < -0.5 &&
+    e.pos.x > 118 &&
+    Math.abs(e.pos.z - DOCK.z) < 9
+  ) {
+    ai.seaT = (ai.seaT || 0) + dt;
+    if (ai.seaT > 2.5) {
+      ai.seaT = 0;
+      puff(e.pos.x, 0, e.pos.z, 0xbfe6ff, 10, 4);
+      e.pos.set(DOCK.x - 2, 0.35, DOCK.z);
+      e.vy = 0;
+      ai.path = null;
+    }
+  } else ai.seaT = 0;
   if (e.stun) {
     e.wx = e.wz = 0;
     if (
@@ -3199,6 +3716,142 @@ function aiRunner(e, dt) {
   }
   const c = nearestChaser(e),
     cd = hyp(c.pos.x - e.pos.x, c.pos.z - e.pos.z);
+  if (
+    roundT < 60 &&
+    phase === "game" &&
+    !shipReady() &&
+    COURSE.length > 6 &&
+    !e.hidden &&
+    !e.stun &&
+    !RAFT.go &&
+    (e.raft != null ||
+      e.hop ||
+      e.ci != null ||
+      (cd > 9 &&
+        ents.filter((o) => o.role === "runner" && o.alive && !o.cap).length >=
+          RSEAT.length))
+  ) {
+    ai.lad = ai.ladTop = null;
+    aiRunnerFin(e, dt);
+    return;
+  } // last minute: five free runners can take the raft already
+  if (
+    roundT < 42 &&
+    shipGone &&
+    !e.hidden &&
+    cd > 12 &&
+    ai.alert <= 0 &&
+    COURSE.length > 6
+  ) {
+    // the flood is close: wait beside the posts that lead to the raft
+    const q = COURSE[3 + ((ents.indexOf(e) * 2) % (COURSE.length - 5))];
+    e.run = true;
+    if (e.stance) setStance(e, 0);
+    if (hyp(q.x - e.pos.x, q.z - e.pos.z) > 3.6)
+      navTo(e, q.x + 1.9, q.z + 1.9, dt);
+    else e.wx = e.wz = 0;
+    return;
+  }
+  if (ai.lad) {
+    if (cd < 3.5 && e.pos.y < 0.4 && !(e.onLadder > 0)) ai.lad = null;
+    else if (ladderAI(e, dt)) return;
+  }
+  if (ai.ladTop) {
+    const l = ai.ladTop;
+    ai.roofT = (ai.roofT === undefined ? rnd(9, 18) : ai.roofT) - dt; // up on the roof: keep low and wait, leave when a chaser comes up or after a while
+    const danger = chasers.some(
+      (o) =>
+        o.pos.y > 1.2 &&
+        hyp(o.pos.x - e.pos.x, o.pos.z - e.pos.z) < 12 &&
+        Math.abs(o.pos.y - e.pos.y) < 6,
+    );
+    if (
+      e.pos.y < l.y1 - 1 ||
+      ai.roofT <= 0 ||
+      danger ||
+      shipReady() ||
+      (roundT < 45 && shipGone)
+    ) {
+      ai.ladTop = null;
+      ai.roofT = undefined;
+      ai.ladCd = clock + 25;
+      if (danger) ai.alert = 6;
+      if (e.stance) setStance(e, 0);
+      if (e.pos.y > l.y1 - 1) {
+        const fc = chasers.reduce(
+            (b, o) =>
+              !b ||
+              hyp(o.pos.x - e.pos.x, o.pos.z - e.pos.z) <
+                hyp(b.pos.x - e.pos.x, b.pos.z - e.pos.z)
+                ? o
+                : b,
+            null,
+          ),
+          dx = e.pos.x - fc.pos.x,
+          dz = e.pos.z - fc.pos.z,
+          d = hyp(dx, dz) || 1;
+        ai.roofOff = { x: dx / d, z: dz / d, t: 2.2 };
+      }
+    } else {
+      const dx = l.lx - l.nx * 1.6 - e.pos.x,
+        dz = l.lz - l.nz * 1.6 - e.pos.z,
+        d = hyp(dx, dz);
+      e.run = false;
+      if (d > 0.6) {
+        e.wx = dx / d;
+        e.wz = dz / d;
+      } else {
+        e.wx = e.wz = 0;
+        setStance(e, 1);
+      }
+      return;
+    }
+  }
+  if (ai.roofOff) {
+    const o = ai.roofOff;
+    o.t -= dt;
+    if (o.t <= 0 || e.pos.y < 1) ai.roofOff = null;
+    else {
+      e.run = true;
+      e.wx = o.x;
+      e.wz = o.z;
+      stuckCheck(e, dt);
+      return;
+    }
+  } // run off the edge, away from the chaser
+  if (
+    !e.fuel &&
+    !e.wood &&
+    !e.iron &&
+    !e.sail &&
+    !(ai.ladCd > clock) &&
+    e.pos.y < 0.4 &&
+    cd > 9 &&
+    (ai.alert > 0 ? cd < 40 : Math.random() < dt * 0.02 * (0.4 + LVL.smart))
+  ) {
+    let l = null,
+      bd = ai.alert > 0 ? 16 : 30;
+    for (const q of ladders) {
+      const d = hyp(q.sx - e.pos.x, q.sz - e.pos.z);
+      if (
+        d < bd &&
+        hyp(q.sx - c.pos.x, q.sz - c.pos.z) > d + 6 &&
+        !ents.some(
+          (o) => o !== e && o.ai && (o.ai.lad === q || o.ai.ladTop === q),
+        )
+      ) {
+        bd = d;
+        l = q;
+      }
+    }
+    if (l && (ai.alert <= 0 || Math.random() < 0.5 + 0.5 * LVL.smart)) {
+      ai.lad = l;
+      ai.ladT = 14;
+      ai.path = null;
+      ladderAI(e, dt);
+      return;
+    } else if (ai.alert > 0) ai.ladCd = clock + 6;
+  }
   if (runnerExtras(e, dt, c, cd)) return;
   // ---- multi-floor buildings: hide upstairs, and jump out of a balcony when the chaser comes up ----
   const T = towerOf(e.pos.x, e.pos.z),
@@ -3419,6 +4072,16 @@ function aiChaser(e, dt) {
     e.wx = e.wz = 0;
     return;
   }
+  if (FIN.on) {
+    ai.lad = null;
+    aiChaserFin(e, dt);
+    return;
+  }
+  if (ai.lad) {
+    const t = ai.tgt;
+    if (!t || !t.alive || t.cap || t.pos.y < ai.lad.y1 - 1.5) ai.lad = null;
+    else if (ladderAI(e, dt)) return;
+  }
   const nearSpot = () =>
     ai.spot && hyp(e.pos.x - ai.spot.x, e.pos.z - ai.spot.z) < 2.6;
   if (phase === "lobby") {
@@ -3486,6 +4149,26 @@ function aiChaser(e, dt) {
     ai.spot = null;
   } else if (ai.mem <= 0) ai.tgt = null;
   if (chaserExtras(e, dt, tgt)) return;
+  if (!tgt && phase === "game" && roundT < 28 && COURSE.length) {
+    const k = chasers.indexOf(e) % 3,
+      q =
+        COURSE[k === 0 ? COURSE.length - 1 : k === 1 ? COURSE.length >> 1 : 2];
+    if (hyp(q.x - e.pos.x, q.z - e.pos.z) > 5)
+      navTo(e, q.x + 2.5, q.z + 2.5, dt);
+    else e.wx = e.wz = 0;
+    return;
+  } // the flood is seconds away: wait along the course to the raft
+  if (!tgt && ai.smoke) {
+    if (
+      ai.smoke.t < clock ||
+      hyp(ai.smoke.x - e.pos.x, ai.smoke.z - e.pos.z) < 5
+    )
+      ai.smoke = null;
+    else {
+      navTo(e, ai.smoke.x, ai.smoke.z, dt);
+      return;
+    }
+  } // smoke over a campfire: go and look
   if (!tgt && ai.tgt && ai.tgt.alive && ai.mem > 0 && LVL.smart > 0.3)
     tgt = ai.tgt; // remembers where you went
   if (tgt) {
@@ -3541,6 +4224,18 @@ function aiChaser(e, dt) {
       handled = true;
       mtnNav(e, null, dt);
     } // target left: walk back down
+    if (!handled && dy > 2.5 && e.pos.y < 0.5 && !e.carry) {
+      const l = ladderFor(tgt.pos.x, tgt.pos.y, tgt.pos.z, 26);
+      if (l && hyp(l.sx - e.pos.x, l.sz - e.pos.z) < 45) {
+        ai.lad = l;
+        ai.ladT = 16;
+        ai.tgt = tgt;
+        ai.mem = Math.max(ai.mem, 8);
+        handled = true;
+        ladderAI(e, dt);
+        return;
+      }
+    } // a ladder leads up there
     if (!handled && dy > 0.9) {
       const sb = surfaceUnder(tgt);
       if (sb && sb.y1 > e.pos.y + 0.9) {
@@ -4239,6 +4934,71 @@ function start0(role, mp) {
 document
   .querySelectorAll("#menu [data-role]")
   .forEach((b) => b.addEventListener("click", () => start(b.dataset.role)));
+/* ---------- explore mode: you alone on the island, time stopped, a few test buttons ---------- */
+const XP = { on: false, run: false, fast: false };
+function xpUi() {
+  $("xprun").textContent = XP.run ? "Time: running" : "Time: stopped";
+  $("xprun").classList.toggle("on", XP.run);
+  $("xpfast").classList.toggle("on", XP.fast);
+}
+if ($("explore")) {
+  $("explore").addEventListener("click", () => {
+    XP.on = true;
+    start("runner");
+    lobbyT = 0.05;
+    $("xp").classList.remove("hide");
+    $("skip").classList.add("hide");
+    xpUi();
+    msg(
+      "Explore mode — you are alone, time is stopped. Use the buttons on the left to test things",
+    );
+  });
+  $("xprun").addEventListener("click", () => {
+    XP.run = !XP.run;
+    xpUi();
+  });
+  $("xpfast").addEventListener("click", () => {
+    XP.fast = !XP.fast;
+    xpUi();
+  });
+  $("xpparts").addEventListener("click", () => {
+    const e = player;
+    e.wood = WOOD_MAX;
+    e.wet = 0;
+    e.iron = IRON_MAX;
+    e.sail = 1;
+    e.fuel = true;
+    setStatus(
+      "Explore: you carry 4 planks, 2 iron, sail cloth and a fuel can — take them aboard the ship",
+      3,
+    );
+  });
+  $("xpdock").addEventListener("click", () => {
+    player.pos.set(DOCK.x - 4, 0.4, DOCK.z);
+    player.vy = 0;
+  });
+  $("xpjail").addEventListener("click", () => {
+    player.pos.set(JAIL.x, JAIL.y + 0.2, JAIL.z + 4.5);
+    player.vy = 0;
+  });
+  $("xptide").addEventListener("click", () => {
+    roundT = Math.min(roundT, ROUND_TIME - TIDE_START - 60);
+    XP.run = true;
+    xpUi();
+  });
+  $("xplast").addEventListener("click", () => {
+    if (roundT > 61) roundT = 61;
+    XP.run = true;
+    xpUi();
+  });
+  $("xpflood").addEventListener("click", () => {
+    if (roundT > 1) roundT = 1;
+    XP.run = true;
+    xpUi();
+  });
+  for (const b of document.querySelectorAll("#xp button"))
+    b.addEventListener("click", () => b.blur());
+}
 function endGame(chaserWon) {
   if (NET.guest && !NET.endOk) return;
   if (NET.host) netEnd("g", chaserWon);
@@ -4248,16 +5008,19 @@ function endGame(chaserWon) {
   const left = ents.filter((e) => e.role === "runner" && e.alive).length;
   const iWon =
     player.role === "chaser" ? chaserWon : !chaserWon && player.alive;
-  $("endt").textContent = chaserWon ? "👊 CHASER WINS" : "🏃 RUNNERS SURVIVE";
+  $("endt").textContent = chaserWon ? "👊 CHASERS WIN" : "🏃 RUNNERS SURVIVE";
   $("endp").textContent =
     (chaserWon
-      ? `${chasers.map((c) => c.name).join(" & ")} captured every runner.`
+      ? FIN.on
+        ? "No runner made it off the flooded island."
+        : `${chasers.map((c) => c.name).join(" & ")} captured every runner.`
       : `${left} runner${left > 1 ? "s" : ""} escaped.`) +
     (iWon
       ? " You win! 🎉"
       : player.role === "runner" && !chaserWon
         ? " (but you got caught…)"
         : " You lose.");
+  if (chaserWon) endTaunt();
   setTimeout(() => $("end").classList.remove("hide"), 1200);
 }
 const fmt = (t) => {
@@ -4391,9 +5154,18 @@ function updateHud(dt) {
     phase === "lobby"
       ? "ROUND STARTS IN"
       : phase === "game"
-        ? "ISLAND FLOODS IN"
+        ? FIN.on || RAFT.go
+          ? RAFT.go
+            ? "RAFT TO OPEN SEA"
+            : "RAFT LEAVES IN"
+          : "ISLAND FLOODS IN"
         : "ROUND OVER";
-  $("timer").textContent = fmt(phase === "lobby" ? lobbyT : roundT);
+  $("timer").textContent =
+    (FIN.on || RAFT.go) && phase === "game"
+      ? RAFT.go
+        ? Math.max(0, Math.round(R_ISLAND + 40 - hyp(RAFT.x, RAFT.z))) + " m"
+        : fmt(FIN.t)
+      : fmt(phase === "lobby" ? lobbyT : roundT);
   $("left").innerHTML =
     `Free: <b>${alive}</b>/${tot} (need ${NEED()})` +
     (p.role === "chaser" ? ` · Traps: <b>${trapBudget}</b>` : "");
@@ -4518,18 +5290,25 @@ const tramps = [],
 let fuelDone = 0,
   boatT = 0;
 /* the ship is a wreck: it needs wood (from the beaches), iron (from buildings) and fuel before it can sail */
-const WOOD_NEED = 20,
-  IRON_SHIP = 3,
+const WOOD_NEED = 24,
+  IRON_SHIP = 5,
   WOOD_MAX = 4,
-  IRON_MAX = 2;
+  IRON_MAX = 2,
+  SAIL_NEED = 3,
+  PRY_T = 3;
 let woodDone = 0,
   ironDone = 0,
   chainsMade = 0,
-  readyTold = false;
+  readyTold = false,
+  sailDone = 0;
 let shipGone = false,
   shipGoneT = 0;
 const shipReady = () =>
-  !shipGone && fuelDone >= 3 && woodDone >= WOOD_NEED && ironDone >= IRON_SHIP;
+  !shipGone &&
+  fuelDone >= 3 &&
+  woodDone >= WOOD_NEED &&
+  ironDone >= IRON_SHIP &&
+  sailDone >= SAIL_NEED;
 const SHIPFX = { holes: [], iron: [], sign: null, key: "" };
 const custom = { name: "You", color: 0x1f5f8a, hat: "none" };
 const HATS = ["none", "cap", "tophat", "party", "crown", "helmet"];
@@ -4542,6 +5321,7 @@ Object.assign(ITEM_INFO, {
   kit: { n: "trap kit", ring: 0xffd23f },
   fuel: { n: "fuel can", ring: 0xffb020 },
   iron: { n: "iron part", ring: 0xff4d4d },
+  sail: { n: "sail cloth", ring: 0xffffff },
   wood: { n: "plank", ring: 0xd9a05b },
   axe: { n: "axe", ring: 0x35c8ff },
 });
@@ -4576,6 +5356,12 @@ const EXTRA_MESH = {
     add(1.0, 0.1, 0.24, 0xc48a4a, 0, -0.1, 0);
     add(1.0, 0.1, 0.24, 0xa9743a, 0.05, 0.02, 0.1);
     add(0.9, 0.1, 0.24, 0xd9a05b, -0.05, 0.14, -0.06);
+  },
+  sail(add) {
+    add(0.75, 0.24, 0.24, 0xf2efe6, 0, 0, 0);
+    add(0.08, 0.26, 0.26, 0xb9772e, -0.22, 0, 0);
+    add(0.08, 0.26, 0.26, 0xb9772e, 0.22, 0, 0);
+    add(0.3, 0.3, 0.04, 0xf2efe6, 0.1, -0.2, 0.1);
   },
   iron(add) {
     add(0.7, 0.16, 0.16, 0x4a4f58, 0, -0.1, 0);
@@ -4710,6 +5496,35 @@ function buildExtras() {
       m.visible = false;
       SHIPFX.iron.push(m);
     }
+    SHIPFX.sail = [];
+    deco(bx + 0.6, 4.4, bz, 0.2, 6.2, 0.2, 0x6b4a2a);
+    for (let i = 0; i < 3; i++) {
+      const y = 6.15 - i * 1.6,
+        w = 3.3 + i * 0.55;
+      deco(bx + 0.74, y + 1.42, bz, 0.14, 0.14, w + 0.5, 0x6b4a2a);
+      const m = deco(
+        bx + 0.76,
+        y,
+        bz,
+        0.1,
+        1.4,
+        w,
+        i === 1 ? 0xe8e2d2 : 0xf7f4ec,
+      );
+      const st = deco(bx + 0.76, y + 0.35, bz, 0.18, 0.45, w, 0xc9302c);
+      m.material = new THREE.MeshLambertMaterial({
+        color: 0xffffff,
+        emissive: 0x8a8678,
+      });
+      st.material = new THREE.MeshLambertMaterial({
+        color: 0xd8342c,
+        emissive: 0x5a1210,
+      });
+      m.visible = st.visible = false;
+      SHIPFX.sail.push(m);
+      SHIPFX.sailS = SHIPFX.sailS || [];
+      SHIPFX.sailS.push(st);
+    }
   }
   SHIPFX.meshes = scene.children.slice(shipN0);
   {
@@ -4766,7 +5581,7 @@ function buildExtras() {
   }
   deco(120.5, 0, DOCK.z + 3.2, 0.2, 2.6, 0.2, 0x6d5b4b);
   const sign = textSprite(
-    "🛠 DOCK: bring planks, iron and fuel",
+    "🛠 DOCK: bring planks, iron, sail and fuel",
     "#ffd23f",
     44,
     "rgba(20,30,40,.85)",
@@ -4832,6 +5647,7 @@ function buildExtras() {
     deco(ax, ay, az, 0.15, 2.3, 0.15, 0x444b55);
     deco(ax, ay + 2.2, az, 0.5, 0.12, 0.5, 0xffd23f);
     deco(bx, 0, bz, 0.2, 3.3, 0.2, 0x444b55);
+    deco(bx, 3.3, bz, 0.5, 0.12, 0.5, 0xffd23f);
     const c = new THREE.Mesh(BOX, mat(0x1c1c1c));
     c.scale.set(0.05, 0.05, len);
     c.position.copy(A).add(B).multiplyScalar(0.5);
@@ -5187,8 +6003,9 @@ function setupExtras() {
   CHAIN.told = false;
   ironN = 0;
   const pool = [];
-  for (let i = 0; i < 14; i++) pool.push("iron");
-  for (let i = 0; i < 6; i++) pool.push("axe");
+  for (let i = 0; i < 16; i++) pool.push("iron");
+  for (let i = 0; i < 3; i++) pool.push("axe");
+  for (let i = 0; i < 5; i++) pool.push("sail");
   const bl = interiors.slice();
   for (let i = bl.length - 1; i > 0; i--) {
     const j = Math.floor(rnd(i + 1));
@@ -5207,19 +6024,20 @@ function setupExtras() {
           !hit(x, 0, z, 0.5, 1.5) &&
           !items.some((i) => hyp(i.x - x, i.z - z) < 2.2)
         ) {
-          spawnItem(pool.pop(), x, z);
+          const t = pool.pop();
+          spawnItem(t, x, z, 0, t === "iron");
           break;
         }
       }
     }
   for (const t of pool) {
     const p = randFree(0, 0, 8, R_GRASS - 8);
-    if (p) spawnItem(t, p.x, p.z);
+    if (p) spawnItem(t, p.x, p.z, 0, t === "iron");
   }
-  woodDone = ironDone = chainsMade = 0;
+  woodDone = ironDone = chainsMade = sailDone = 0;
   readyTold = false;
   SHIPFX.key = "";
-  for (let i = 0, tries = 0; i < 30 && tries < 900; tries++) {
+  for (let i = 0, tries = 0; i < 36 && tries < 1200; tries++) {
     // driftwood scattered along the beaches
     const a = rnd(6.283),
       r = rnd(110.5, 120.5),
@@ -5229,11 +6047,11 @@ function setupExtras() {
       hit(x, 0, z, 0.7, 1.5) ||
       riverDist(x, z) < 3 ||
       hyp(x - DOCK.x, z - DOCK.z) < 14 ||
-      items.some((k) => hyp(k.x - x, k.z - z) < 7)
+      items.some((k) => hyp(k.x - x, k.z - z) < 6)
     )
       continue;
-    spawnItem("wood", x, z);
-    i++;
+    spawnItem("wood", x, z, 0, false, i % 5 < 2);
+    i++; // two planks in five lie in the surf and are soaked
   }
 }
 
@@ -5572,11 +6390,33 @@ function leaveBoat(e) {
   b.rider = null;
   e.boat = null;
   e.boatCd = 2.5;
-  GR = navC;
-  const c = nearestFree(cellOf(b.x), cellOf(b.z));
-  GR = nav;
-  if (c >= 0) e.pos.set(cw(c % N), 0, cw((c / N) | 0));
+  b.v = 0;
+  const p = riverAt(b.ri, b.s),
+    hw = RIVERS[b.ri].hw,
+    first = e.wx * -p.dz + e.wz * p.dx >= 0 ? 1 : -1;
+  let done = false; // step out onto the bank (the side you are steering towards)
+  for (const sd of [first, -first])
+    for (const off of [1.3, 2.1, 3.1, 4.2]) {
+      const x = b.x - p.dz * sd * (hw + off),
+        z = b.z + p.dx * sd * (hw + off);
+      if (
+        !done &&
+        navFree(x, z) &&
+        !inRiver(x, z) &&
+        !hit(x, 0, z, RAD + 0.1, 1.8)
+      ) {
+        e.pos.set(x, 0, z);
+        done = true;
+      }
+    }
+  if (!done) {
+    GR = navC;
+    const c = nearestFree(cellOf(b.x), cellOf(b.z));
+    GR = nav;
+    if (c >= 0) e.pos.set(cw(c % N), 0, cw((c / N) | 0));
+  }
   e.vy = 0;
+  e.kx = e.kz = 0;
   if (e.hum) statusTo(e, "");
 }
 function specialMove(e, dt) {
@@ -5598,10 +6438,66 @@ function specialMove(e, dt) {
     e.kx = e.kz = 0;
     return true;
   }
-  if (e.cap === "tied") {
+  if (e.cap === "tied" || e.cap === "out") {
     e.vy = 0;
     e.moving = 0;
     e.kx = e.kz = 0;
+    return true;
+  }
+  if (e.raft != null) {
+    if (e.stun && e.stun.type === "stagger") e.stun = null; // riders hold on: a punch hurts but only a PUSH throws them off
+    if ((e.stun || !e.alive) && phase === "game") raftOff(e, null);
+    else {
+      const o = RSEAT[e.raft % RSEAT.length],
+        sn = Math.sin(RAFT.yaw),
+        cs = Math.cos(RAFT.yaw);
+      e.pos.set(
+        RAFT.x + o[0] * cs + o[1] * sn,
+        0.42,
+        RAFT.z - o[0] * sn + o[1] * cs,
+      );
+      e.yaw = RAFT.yaw;
+      e.vy = 0;
+      e.moving = 0;
+      e.kx = e.kz = 0;
+      e.onGround = true;
+      return true;
+    }
+  }
+  if (e.hop) {
+    const h = e.hop; // a bot jumping from post to post
+    if (e.stun || !e.alive) {
+      e.hop = null;
+      e.ci = undefined;
+      return false;
+    }
+    h.t += dt;
+    const k = Math.min(1, h.t / h.dur);
+    e.pos.set(
+      h.fx + (h.tx - h.fx) * k,
+      h.fy + (h.ty - h.fy) * k + Math.sin(k * Math.PI) * h.arc,
+      h.fz + (h.tz - h.fz) * k,
+    );
+    e.yaw = Math.atan2(h.tx - h.fx, h.tz - h.fz);
+    e.vy = 0;
+    e.onGround = false;
+    e.moving = 6;
+    e.kx = e.kz = 0;
+    if (k >= 1) {
+      e.hop = null;
+      e.onGround = true;
+      if (h.raft) {
+        if (raftCrew().length < RSEAT.length && !RAFT.go) raftOn(e);
+        else e.ci = undefined;
+      } else {
+        e.ci = h.ci < 0 ? undefined : h.ci;
+        if (h.ci < 0) {
+          puff(e.pos.x, 0.3, e.pos.z, 0xbfe6ff, 12, 4);
+          popText("SPLASH!", e.pos.x, 2.2, e.pos.z, "#9fe0ff", 0.9);
+          e.stun = { type: "slip", t: 0.7 };
+        }
+      }
+    }
     return true;
   }
   if (e.seatCd > 0) e.seatCd -= dt;
@@ -5667,17 +6563,23 @@ function specialMove(e, dt) {
       leaveBoat(e);
       return false;
     }
-    const b = e.boat;
-    b.s += b.dir * 11 * dt;
-    if (b.s >= b.max || b.s <= b.min) {
-      b.s = clamp(b.s, b.min, b.max);
-      b.dir *= -1;
-      const p = riverAt(b.ri, b.s);
-      b.x = p.x;
-      b.z = p.z;
-      leaveBoat(e);
-      return false;
-    }
+    const b = e.boat,
+      p0 = riverAt(b.ri, b.s),
+      al = clamp(e.wx * p0.dx + e.wz * p0.dz, -1, 1); // row along the river with the stick / keys; let go and the boat stops
+    b.v =
+      (b.v || 0) +
+      ((Math.abs(al) > 0.25 ? al * 9 : 0) - (b.v || 0)) * Math.min(1, dt * 3);
+    b.s = clamp(b.s + b.v * dt, b.min, b.max);
+    if (b.s <= b.min || b.s >= b.max) b.v = 0;
+    if (Math.abs(b.v) > 0.4) b.dir = Math.sign(b.v);
+    if (e.hum && Math.abs(b.v) < 0.4)
+      statusTo(
+        e,
+        b.s <= b.min || b.s >= b.max
+          ? "🚣 End of the river — row back or JUMP to step out"
+          : "🚣 Move along the river to row · JUMP to step out",
+        0.4,
+      );
     const p = riverAt(b.ri, b.s);
     b.x = p.x;
     b.z = p.z;
@@ -5685,7 +6587,7 @@ function specialMove(e, dt) {
     e.yaw = Math.atan2(p.dx * b.dir, p.dz * b.dir);
     e.vy = 0;
     e.onGround = false;
-    e.moving = 0;
+    e.moving = Math.abs(b.v);
     e.kx = e.kz = 0;
     return true;
   }
@@ -5708,12 +6610,16 @@ function specialMove(e, dt) {
         if (!b.rider && hyp(e.pos.x - b.x, e.pos.z - b.z) < 1.9) {
           e.boat = b;
           b.rider = e;
+          b.v = 0;
           e.stance = 0;
-          setStatus("🚣 Rowing! (JUMP to hop out)", 2);
+          setStatus(
+            "🚣 In the boat — move along the river to row, JUMP to step out",
+            2.5,
+          );
           return true;
         }
   }
-  if (e.isPlayer)
+  if (e.isPlayer || (e.ai && e.ai.lad))
     for (const l of ladders)
       if (
         e.pos.x > l.x0 &&
@@ -5724,6 +6630,15 @@ function specialMove(e, dt) {
       ) {
         const into = -(e.wx * l.nx + e.wz * l.nz);
         if (into < -0.3 || (into < 0.3 && e.pos.y < 0.3)) break; // walking away / just passing by
+        if (
+          e.isPlayer &&
+          into < 0.3 &&
+          Math.abs(e.wx * l.nz - e.wz * l.nx) > 0.45
+        ) {
+          e.onLadder = 0;
+          if (e.vy < -2) e.vy = -2;
+          break;
+        } // v51: steer sideways to step off onto a ledge beside the ladder
         e.onLadder = 0.2;
         e.vy = 0;
         e.kx = e.kz = 0;
@@ -5820,7 +6735,13 @@ function afterMove(e, dt) {
 }
 function visExtras(e) {
   const v = e.v;
-  v.g.visible = !e.hidden;
+  v.g.visible = !e.hidden && e.cap !== "out";
+  if (e.raft != null) {
+    const s = Math.sin(clock * 7 + e.raft);
+    v.body.position.y = -0.3;
+    v.legL.rotation.x = v.legR.rotation.x = -1.45;
+    v.armL.rotation.x = v.armR.rotation.x = e.rcap ? -0.9 : -0.9 + s * 0.6;
+  }
   if (e.cap === "tied") {
     v.body.rotation.set(0, 0, 0);
     v.body.position.set(0, 0, 0);
@@ -5929,6 +6850,14 @@ function visExtras(e) {
     e.woodMesh = m;
   }
   if (e.woodMesh) e.woodMesh.visible = !!e.wood;
+  if (e.sail && !e.sailMesh) {
+    const m = itemMesh("sail");
+    m.position.set(0, 1.25, -0.42);
+    m.scale.multiplyScalar(1.25);
+    v.body.add(m);
+    e.sailMesh = m;
+  }
+  if (e.sailMesh) e.sailMesh.visible = !!e.sail;
   if (e.fuel && !e.fuelMesh) {
     const m = itemMesh("fuel");
     m.position.set(0, 1.15, -0.36);
@@ -5945,7 +6874,10 @@ function visExtras(e) {
 }
 
 /* ---------- bot hooks ---------- */
-const DOCKGO = { x: 117.5, z: -40 };
+const DOCKGO = { x: 117.5, z: -40 },
+  SHIP_T = { wood: 1.6, iron: 1.6, sail: 3, fuel: 5 };
+const cargo = (e) =>
+  !!(e.fuel || e.sail || (e.iron || 0) > 0 || (e.wood || 0) - (e.wet || 0) > 0);
 function shoveOff(c, r) {
   // a chaser throws a seated runner off the ship
   const dx = r.pos.x - c.pos.x,
@@ -5997,11 +6929,16 @@ function toDock(e, dt) {
       goTo(e, DOCKGO.x, DOCKGO.z);
     if (!follow(e)) moveTo(e, DOCK.x - 1, DOCK.z);
     stuckCheck(e, dt);
-  } else if (!shipReady()) {
+  } else if (!shipReady() && !cargo(e)) {
     if (hyp(e.pos.x - DOCK.x, e.pos.z - DOCK.z) > 4)
       moveTo(e, DOCK.x - 1, DOCK.z);
     else e.wx = e.wz = 0;
-  } else if (e.pos.x < 130.5 && !onShip(e))
+  } else if (onShip(e) && !shipReady()) {
+    const gx = SHIP.x - 3 + (ents.indexOf(e) % 5) * 1.3;
+    if (Math.abs(e.pos.x - gx) > 0.5) moveTo(e, gx, SHIP.z);
+    else e.wx = e.wz = 0;
+  } // aboard with parts: stand still and fit them
+  else if (e.pos.x < 130.5 && !onShip(e))
     moveTo(
       e,
       131.5,
@@ -6154,28 +7091,29 @@ function runnerExtras(e, dt, c, cd) {
     iLeft = IRON_SHIP - ironDone;
   if (
     (e.fuel ||
+      e.sail ||
       (e.iron || 0) > 0 ||
-      (e.wood || 0) >= Math.min(3, Math.max(1, wLeft))) &&
+      (e.wood || 0) >= Math.min(WOOD_MAX, Math.max(1, wLeft))) &&
     !noShip &&
     ai.alert <= 0
   ) {
-    toDock(e, dt);
+    if (!dryFirst(e, dt)) toDock(e, dt);
     return true;
   }
   if (ai.fan === undefined) {
-    ai.fan = Math.random() < 0.55 + 0.4 * LVL.smart;
-    ai.job = Math.random() < 0.6 ? "wood" : "fuel";
+    ai.fan = Math.random() < 0.72 + 0.28 * LVL.smart;
+    ai.job = Math.random() < 0.72 ? "wood" : "fuel";
   }
-  if (ai.fan && !noShip && !e.fuel && ai.alert <= 0 && cd > 14 && !ai.hideGo) {
+  if (ai.fan && !noShip && !e.fuel && ai.alert <= 0 && cd > 11 && !ai.hideGo) {
     let it = null,
       bd = 1e9;
     const near = (x, z, o) => {
-      const d = hyp(x - e.pos.x, z - e.pos.z);
+      const d = hyp(x - e.pos.x, z - e.pos.z) + (o.wet ? 35 : 0);
       if (d < bd) {
         bd = d;
         it = o;
       }
-    };
+    }; // soaked planks are a last choice: they cost a trip to a campfire
     const job =
       ai.job === "wood" && wLeft <= 0
         ? "fuel"
@@ -6200,11 +7138,21 @@ function runnerExtras(e, dt, c, cd) {
             (e.wood || 0) < WOOD_MAX) ||
           (k.type === "iron" &&
             ironDone + iCar < IRON_SHIP &&
+            hyp(k.x - e.pos.x, k.z - e.pos.z) < 60) ||
+          (k.type === "sail" &&
+            !e.sail &&
+            sailDone +
+              ents.reduce(
+                (n, o) =>
+                  n + (o.role === "runner" && o.alive ? o.sail || 0 : 0),
+                0,
+              ) <
+              SAIL_NEED &&
             hyp(k.x - e.pos.x, k.z - e.pos.z) < 60))
       )
         near(k.x, k.z, k);
     if (!it && (e.wood || 0) > 0) {
-      toDock(e, dt);
+      if (!dryFirst(e, dt)) toDock(e, dt);
       return true;
     }
     if (e.shovel && job === "fuel" && fuelDone < 3)
@@ -6431,6 +7379,10 @@ function chaserExtras(e, dt, tgt) {
 /* ---------- player actions / keys ---------- */
 function extraAction(p, a) {
   if (a === "jump") {
+    if (p.raft != null) {
+      if (!RAFT.go) raftOff(p, null, true);
+      return true;
+    }
     if (p.seat != null) {
       leaveSeat(p);
       setStatus("");
@@ -6519,6 +7471,112 @@ function extraKey(code) {
 
 /* ---------- per-frame systems ---------- */
 let cine = null;
+function endTaunt() {
+  // the chasers won: they jump about on the prison and tease, the title stands on the left
+  if (cine) return;
+  document.body.classList.add("cine");
+  $("sndpanel").classList.add("hide");
+  $("end").classList.add("esc");
+  $("obj").innerHTML = "";
+  cine = {
+    kind: "ch",
+    t: 0,
+    sayT: 0.6,
+    n: 0,
+    ch: chasers.slice(0, 5),
+    mine: player.role === "chaser",
+  };
+}
+function tauntUpdate(dt) {
+  const C = cine;
+  C.t += dt;
+  const n = C.ch.length,
+    P = JAIL,
+    fz = P.z + 5.1;
+  C.ch.forEach((c, i) => {
+    const V = c.v,
+      w = Math.sin(C.t * 12 + i * 2.1),
+      hop = Math.abs(Math.sin(C.t * 6.2 + i * 1.3)) * 0.75;
+    c.stun = null;
+    c.atk = null;
+    c.pos.set(P.x + (i - (n - 1) / 2) * 1.75, P.y + hop, fz);
+    c.vy = 0;
+    c.yaw = Math.sin(C.t * 2 + i) * 0.25;
+    V.g.position.copy(c.pos);
+    V.g.rotation.y = c.yaw;
+    V.body.position.set(0, 0, 0);
+    V.body.scale.set(1, 1, 1);
+    V.body.rotation.set(0, 0, w * 0.1);
+    V.head.rotation.z = w * 0.16;
+    V.legL.rotation.x = hop > 0.3 ? -0.7 : 0;
+    V.legR.rotation.x = hop > 0.3 ? 0.5 : 0;
+    if ((i + Math.floor(C.t / 2.2)) % 2) {
+      V.armL.rotation.x = Math.PI + w * 0.45;
+      V.armR.rotation.x = Math.PI - w * 0.45;
+      V.armL.rotation.z = -0.3;
+      V.armR.rotation.z = 0.3;
+    } // both arms up
+    else {
+      V.armR.rotation.x = -1.5 + w * 0.12;
+      V.armR.rotation.z = 0;
+      V.armL.rotation.x = 0.3;
+      V.armL.rotation.z = -0.5;
+    } // pointing at you
+    if (c.label) c.label.visible = true;
+  });
+  C.sayT -= dt;
+  if (C.sayT <= 0 && n) {
+    C.sayT = C.t < 8 ? 0.85 : 1.7;
+    const c = C.ch[C.n++ % n],
+      L = C.mine
+        ? [
+            "WE WIN! 🎉",
+            "GOT THEM ALL!",
+            "NOBODY ESCAPES!",
+            "TOO EASY! 😜",
+            "HA HA HA!",
+            "WHO IS NEXT?",
+          ]
+        : [
+            "YOU LOSE! 😜",
+            "TOO SLOW! 😝",
+            "GOT YOU ALL!",
+            "HA HA HA!",
+            "NOWHERE TO RUN!",
+            "NICE TRY! 👋",
+            "BETTER LUCK NEXT TIME!",
+          ];
+    popText(
+      L[Math.floor(rnd(L.length))],
+      c.pos.x,
+      P.y + 3.0 + rnd(0.5),
+      c.pos.z,
+      "#ff8a80",
+      1.0,
+    );
+    beep(300 + rnd(240), 0.14, "square", 0.04, 160);
+  }
+  const k = Math.min(1, C.t / 6),
+    sm = k * k * (3 - 2 * k);
+  camera.position.set(
+    P.x + Math.sin(C.t * 0.25) * 0.8,
+    P.y + 2.3 - sm * 0.5,
+    fz + 8.2 - sm * 2.2,
+  );
+  camera.lookAt(P.x, P.y + 1.25, fz);
+  {
+    const W = innerWidth,
+      Hh = innerHeight,
+      wide = W > 760 && W > Hh,
+      kx = wide ? 0.3 * sm : 0,
+      ky = wide ? 0 : 0.16 * sm;
+    if (kx || ky) camera.setViewOffset(W, Hh, -W * kx, -Hh * ky, W, Hh);
+    else if (camera.view) camera.clearViewOffset();
+  } // chasers framed on the right (below on phones)
+  sun.position.set(P.x + 30, 70, fz + 40);
+  sun.target.position.set(P.x, 0, fz);
+  sun.target.updateMatrixWorld();
+}
 function endEscape(list) {
   if (NET.guest && !NET.endOk) return;
   if (NET.host)
@@ -6564,6 +7622,14 @@ function endEscape(list) {
   $("obj").innerHTML = "";
 }
 function cineUpdate(dt) {
+  if (cine.kind === "ch") {
+    tauntUpdate(dt);
+    return;
+  }
+  if (cine.kind === "raft") {
+    raftCine(dt);
+    return;
+  }
   const C = cine;
   C.t += dt;
   if (C.t > 4.5 && !C.shown) {
@@ -6716,6 +7782,7 @@ function updateExtras(dt) {
     const p = riverAt(b.ri, b.s);
     b.m.rotation.y = Math.atan2(p.dx, p.dz);
   }
+  updateFinalFx(dt);
   if (phase !== "game") return;
   updateCaptives(dt);
   for (const r of ents) {
@@ -6751,7 +7818,7 @@ function updateExtras(dt) {
       setStatus(`🤝 Press G (PUSH) to free ${r.name} from the trap`, 0.3);
   }
   {
-    // sneak attack: touch a chaser's back while he has not seen you -> frozen in ice for 5 s
+    // sneak attack: touch a chaser's back while he has not seen you -> frozen in ice for 3 s
     let hint = "";
     for (const c of chasers) {
       if (c.stun || c.carryLock) continue;
@@ -6781,7 +7848,7 @@ function updateExtras(dt) {
                 : `🤫 ${c.name} has not noticed you — CROUCH or walk (running is too loud), then touch his back`;
         if (d > 1.75 || !behind || aware || !quiet || c.freezeImm > 0) continue;
         if (c.carry) dropCarried(c);
-        c.stun = { type: "freeze", t: 5 };
+        c.stun = { type: "freeze", t: 3 };
         c.freezeImm = 15;
         c.atk = null;
         c.charge = null;
@@ -6795,9 +7862,9 @@ function updateExtras(dt) {
         popText("FROZEN!", c.pos.x, c.pos.y + 2.9, c.pos.z, "#9fe0ff", 1.3);
         puff(c.pos.x, c.pos.y + 1.2, c.pos.z, 0x9fe0ff, 22, 4);
         sndAt(c, { f: 900, slide: 500, d: 0.35, type: "triangle", v: 0.25 });
-        msg(`🥶 ${r.name} sneaked up behind ${c.name} — frozen for 5 seconds!`);
+        msg(`🥶 ${r.name} sneaked up behind ${c.name} — frozen for 3 seconds!`);
         if (c.hum)
-          statusTo(c, "🥶 Someone touched you from behind — FROZEN for 5s!", 4);
+          statusTo(c, "🥶 Someone touched you from behind — FROZEN for 3s!", 4);
         if (r.isPlayer) {
           hint = "";
           setStatus("🥶 Got him! He is frozen for 5 seconds — RUN", 2.5);
@@ -6996,32 +8063,106 @@ function updateExtras(dt) {
     if (
       e.role === "runner" &&
       e.alive &&
-      (e.fuel || e.wood || e.iron) &&
-      !shipGone &&
-      hyp(e.pos.x - DOCK.x, e.pos.z - DOCK.z) < 9
+      (e.fuel || e.wood || e.iron || e.sail) &&
+      !shipGone
     ) {
-      if (e.fuel) {
+      // the parts must be carried ABOARD, and fitting each one takes a moment
+      const dry = (e.wood || 0) - (e.wet || 0),
+        has = e.fuel || dry > 0 || e.iron || e.sail,
+        near = hyp(e.pos.x - DOCK.x, e.pos.z - DOCK.z) < 11;
+      if (!has || !onShip(e) || e.stun) {
+        e.shipT = 0;
+        if (e.hum && near && !e.stun)
+          statusTo(
+            e,
+            has
+              ? onShip(e)
+                ? ""
+                : "🛠 Carry it ABOARD the ship — step onto the deck to fit it"
+              : "💧 Wet planks will not hold — dry them at a CAMPFIRE first (🔥 on the map)",
+            0.4,
+          );
+        continue;
+      }
+      const kind =
+          dry > 0 ? "wood" : e.iron ? "iron" : e.sail ? "sail" : "fuel",
+        T = SHIP_T[kind];
+      e.shipT = (e.shipT || 0) + dt;
+      e.shipP = (e.shipP || 0) - dt;
+      if (e.shipP <= 0) {
+        e.shipP = 0.42;
+        const hI = Math.min(
+            SHIPFX.holes.length - 1,
+            Math.floor((woodDone * SHIPFX.holes.length) / WOOD_NEED),
+          ),
+          hp =
+            kind === "wood" && SHIPFX.holes[hI]
+              ? SHIPFX.holes[hI].hole.position
+              : null;
+        puff(
+          hp ? hp.x : e.pos.x + Math.sin(e.yaw) * 0.6,
+          hp ? hp.y : 0.9,
+          hp ? hp.z : e.pos.z + Math.cos(e.yaw) * 0.6,
+          kind === "fuel" ? 0xffb020 : kind === "sail" ? 0xffffff : 0xdcb878,
+          4,
+          2,
+        );
+        sndAt(
+          e,
+          kind === "fuel"
+            ? { f: 240, d: 0.12, type: "sine", v: 0.05, slide: 120 }
+            : { f: 170, d: 0.05, type: "square", v: 0.06 },
+        );
+      }
+      if (e.hum)
+        statusTo(
+          e,
+          (kind === "wood"
+            ? "🪵 Nailing a plank over a hole… "
+            : kind === "iron"
+              ? "🔩 Fitting the iron… "
+              : kind === "sail"
+                ? "⛵ Rigging the sail cloth… "
+                : "⛽ Pouring fuel into the engine… ") +
+            Math.min(99, Math.round((e.shipT / T) * 100)) +
+            "%  (stay on the ship)",
+          0.3,
+        );
+      if (e.shipT < T) continue;
+      e.shipT = 0;
+      beep(700, 0.3, "sine", 0.08, 300);
+      if (kind === "wood") {
+        woodDone = Math.min(WOOD_NEED, woodDone + 1);
+        e.wood--;
+        e.shipN = (e.shipN || 0) + 1;
+        if (e.wood - (e.wet || 0) <= 0 || woodDone >= WOOD_NEED) {
+          msg(
+            `🪵 ${e.name} nailed ${e.shipN} plank${e.shipN > 1 ? "s" : ""} onto the ship (${woodDone}/${WOOD_NEED})`,
+          );
+          e.shipN = 0;
+          if (woodDone >= WOOD_NEED) e.wood = e.wet || 0;
+        }
+      } else if (kind === "iron") {
+        ironDone = Math.min(IRON_SHIP, ironDone + 1);
+        e.iron--;
+        if (ironDone >= IRON_SHIP) e.iron = 0;
+        if (!e.iron)
+          msg(
+            `🔩 ${e.name} fitted iron into the ship (${ironDone}/${IRON_SHIP})`,
+          );
+      } else if (kind === "sail") {
+        sailDone = Math.min(SAIL_NEED, sailDone + 1);
+        e.sail = 0;
+        msg(
+          `⛵ ${e.name} rigged sail cloth on the ship (${sailDone}/${SAIL_NEED})`,
+        );
+      } else {
         e.fuel = false;
         fuelDone++;
         msg(
-          `⛽ ${e.name} delivered fuel to the ship (${Math.min(fuelDone, 3)}/3)`,
+          `⛽ ${e.name} filled fuel into the engine (${Math.min(fuelDone, 3)}/3)`,
         );
       }
-      if (e.wood) {
-        woodDone = Math.min(WOOD_NEED, woodDone + e.wood);
-        msg(
-          `🪵 ${e.name} nailed ${e.wood} plank${e.wood > 1 ? "s" : ""} onto the ship (${woodDone}/${WOOD_NEED})`,
-        );
-        e.wood = 0;
-      }
-      if (e.iron) {
-        ironDone = Math.min(IRON_SHIP, ironDone + e.iron);
-        msg(
-          `🔩 ${e.name} fitted iron into the ship (${ironDone}/${IRON_SHIP})`,
-        );
-        e.iron = 0;
-      }
-      beep(700, 0.3, "sine", 0.08, 300);
     }
   if (shipReady() && !readyTold) {
     readyTold = true;
@@ -7275,16 +8416,24 @@ function updateChain(dt) {
 function updateShipFx() {
   if (shipGone) return;
   const ready = shipReady(),
-    key = ready ? "R" : `${woodDone}|${ironDone}|${fuelDone}`;
+    key = `${ready ? "R" : ""}${woodDone}|${ironDone}|${fuelDone}|${sailDone}`;
+  if (SHIPFX.sail)
+    SHIPFX.sail.forEach((m, i) => {
+      m.visible = SHIPFX.sailS[i].visible = i >= 3 - sailDone;
+    });
   if (key === SHIPFX.key) return;
   SHIPFX.key = key;
-  SHIPFX.holes.forEach((h, i) => {
-    h.hole.visible = i >= woodDone;
-    h.patch.visible = i < woodDone;
-  });
-  SHIPFX.iron.forEach((m, i) => {
-    m.visible = i < ironDone;
-  });
+  {
+    const wn = Math.floor((woodDone * SHIPFX.holes.length) / WOOD_NEED),
+      inn = Math.floor((ironDone * SHIPFX.iron.length) / IRON_SHIP);
+    SHIPFX.holes.forEach((h, i) => {
+      h.hole.visible = i >= wn;
+      h.patch.visible = i < wn;
+    });
+    SHIPFX.iron.forEach((m, i) => {
+      m.visible = i < inn;
+    });
+  }
   if (SHIPFX.sign) {
     scene.remove(SHIPFX.sign);
     SHIPFX.sign.material.map.dispose();
@@ -7294,7 +8443,7 @@ function updateShipFx() {
   const t = textSprite(
     ready
       ? "🚤 SHIP REPAIRED — get aboard and sit down!"
-      : `🛠 WRECKED SHIP needs:  🪵 planks ${tick(woodDone, WOOD_NEED)}   🔩 iron ${tick(ironDone, IRON_SHIP)}   ⛽ fuel ${tick(fuelDone, 3)}`,
+      : `🛠 WRECKED SHIP needs:  🪵 planks ${tick(woodDone, WOOD_NEED)}   🔩 iron ${tick(ironDone, IRON_SHIP)}   ⛵ sail ${tick(sailDone, SAIL_NEED)}   ⛽ fuel ${tick(fuelDone, 3)}`,
     ready ? "#7dffa0" : "#ffd23f",
     40,
     "rgba(15,20,28,.88)",
@@ -7339,7 +8488,7 @@ function hudExtras(p) {
       (p.fuel ? " ⛽" : "");
     $("left").innerHTML +=
       (shipGone
-        ? "<br>Ship: 🌊 swept away — lifeboat at the prison"
+        ? "<br>Ship: 🌊 swept away — raft on the shore"
         : `<br>Ship: 🪵 <b>${woodDone}</b>/${WOOD_NEED} · 🔩 <b>${ironDone}</b>/${IRON_SHIP} · ⛽ <b>${Math.min(3, fuelDone)}</b>/3`) +
       (car ? ` <b style="color:#ffd23f">(carrying${car})</b>` : "");
   }
@@ -7369,7 +8518,41 @@ function hudExtras(p) {
         phase === "game" && alive < need ? "bad" : "",
       ),
       o = "";
-    if (phase === "game") {
+    if (phase === "game" && FIN.on) {
+      const ab = raftCrew().length;
+      c =
+        chip(
+          "ALIVE",
+          "🏃",
+          `${alive}/${nRunners}`,
+          alive < FIN.need ? "bad" : "",
+        ) +
+        sep +
+        chip(
+          "ON THE RAFT",
+          "🛟",
+          `${ab}/${RSEAT.length}`,
+          ab >= FIN.need ? "ok" : "warn",
+        ) +
+        chip("WATER", "🐊", "deadly", "bad");
+      o = RAFT.go
+        ? isCh
+          ? '<b style="color:#ffd23f">🛟 Raft away</b> — swim after it and throw <b>everyone</b> off'
+          : p.raft != null
+            ? p.rcap
+              ? '<b style="color:#ffd23f">🛟 You steer</b> — out to sea, away from the chasers'
+              : '<b style="color:#ffd23f">🛟 Rowing</b> — hold on'
+            : "The raft left without you"
+        : isCh
+          ? "Knock them off the posts — <b>one</b> runner on the raft is enough for them"
+          : FIN.cast > 0
+            ? '<b style="color:#ffd23f">🛟 Casting off in ' +
+              Math.max(0, Math.ceil(CAST_T - FIN.cast)) +
+              "s</b>"
+            : p.raft != null
+              ? "Waiting for <b>" + Math.max(0, FIN.need - ab) + "</b> more"
+              : "Jump post to post to the <b>raft</b> — not through the water";
+    } else if (phase === "game") {
       if (!shipGone && !noShip)
         c +=
           sep +
@@ -7386,6 +8569,12 @@ function hudExtras(p) {
             ironDone >= IRON_SHIP ? "ok" : "",
           ) +
           chip(
+            "SAIL",
+            "⛵",
+            `${sailDone}/${SAIL_NEED}`,
+            sailDone >= SAIL_NEED ? "ok" : "",
+          ) +
+          chip(
             "FUEL",
             "⛽",
             `${Math.min(3, fuelDone)}/3`,
@@ -7393,8 +8582,7 @@ function hudExtras(p) {
           );
       else
         c +=
-          sep +
-          chip(shipGone ? "SHIP GONE" : "NO FUEL", "🛟", "lifeboat", "warn");
+          sep + chip(shipGone ? "SHIP GONE" : "NO FUEL", "🛟", "raft", "warn");
       const el = ROUND_TIME - roundT;
       if (!shipGone) {
         if (el < TIDE_START)
@@ -7431,8 +8619,8 @@ function hudExtras(p) {
           (isCh ? " — stop them!" : "");
       } else if (noShip)
         o = isCh
-          ? "Catch <b>every</b> runner before the flood"
-          : "Stay free until the flood — the <b>lifeboat</b> is at the prison";
+          ? "Catch runners before the flood — then keep them off the <b>raft</b>"
+          : "Stay free until the flood — then get to the <b>raft</b>";
     }
     if (isCh)
       c +=
@@ -7442,12 +8630,22 @@ function hudExtras(p) {
           ? ""
           : chip("CHAIN PARTS", "⛓", `${ironN}/${IRON_NEED}`));
     const car =
-      (p.wood ? ` 🪵×${p.wood}` : "") +
+      (p.wood ? ` 🪵×${p.wood}` + (p.wet ? ` 💧${p.wet} wet` : "") : "") +
       (p.iron ? ` 🔩×${p.iron}` : "") +
+      (p.sail ? " ⛵" : "") +
       (p.fuel ? " ⛽" : "") +
       (p.chain ? " ⛓" : "") +
       (p.axe ? " 🪓" : "");
-    if (car) c += sep + chip("CARRYING", "", car.trim(), "warn");
+    if (!FIN.on && phase === "game" && roundT <= 60)
+      c +=
+        sep +
+        chip(
+          "RAFT",
+          "🛟",
+          `${raftCrew().length}/${RSEAT.length}`,
+          raftCrew().length >= RSEAT.length ? "ok" : "warn",
+        );
+    if (car && !FIN.on) c += sep + chip("CARRYING", "", car.trim(), "warn");
     if (NET.on && NET.ping != null)
       c +=
         sep +
@@ -7515,6 +8713,25 @@ function mapExtras(dot, p, isCh) {
     if (JAIL.life) dot(JAIL.life.x, JAIL.life.z, "#ff7a1a", 2.6);
   }
   for (const b of boats) dot(b.x, b.z, "#7a4a26", 2);
+  for (const F of FIRES)
+    if (F.lit) {
+      const hot = F.ping > clock && Math.sin(clock * 10) > 0;
+      if (!isCh || hot) {
+        dot(F.x, F.z, "#2a1206", 3.4);
+        dot(F.x, F.z, hot ? "#ff2d2d" : "#ff9a2e", 2.3);
+      }
+    }
+  if (FIN.on || shipGone || noShip)
+    for (const q of COURSE) dot(q.x, q.z, "#ffd23f", 1.3);
+  {
+    dot(RAFT.x, RAFT.z, "#111", 4.4);
+    dot(
+      RAFT.x,
+      RAFT.z,
+      FIN.on && Math.sin(clock * 8) > 0 ? "#fff" : "#ff7a1a",
+      3.1,
+    );
+  }
   if (MT.on) {
     mctx.fillStyle = "#fff";
     mctx.font = "9px sans-serif";
@@ -7537,11 +8754,23 @@ function mapExtras(dot, p, isCh) {
   }
   for (const it of items)
     if (it.type === "wood" && !isCh && hyp(it.x - p.pos.x, it.z - p.pos.z) < 50)
-      dot(it.x, it.z, "#c48a4a", 2.2);
+      dot(it.x, it.z, it.wet ? "#5aa9e6" : "#c48a4a", 2.2);
   for (const it of items)
-    if (it.type === "iron" || (it.type === "axe" && !isCh)) {
+    if (
+      it.type === "iron" ||
+      ((it.type === "axe" || it.type === "sail") && !isCh)
+    ) {
       if (hyp(it.x - p.pos.x, it.z - p.pos.z) < 30)
-        dot(it.x, it.z, it.type === "iron" ? "#ff7a7a" : "#7fe3ff", 2.4);
+        dot(
+          it.x,
+          it.z,
+          it.type === "iron"
+            ? "#ff7a7a"
+            : it.type === "sail"
+              ? "#ffffff"
+              : "#7fe3ff",
+          2.4,
+        );
     }
   for (const L of leaks) {
     const X = mp(L.x),
@@ -7580,7 +8809,16 @@ function buildJail() {
         z = 22 + Math.sin(a) * r;
       if (
         hyp(x, z) > R_GRASS - 15 ||
-        hit(x, 0, z, 11, 3) ||
+        colliders.some(
+          (b) =>
+            !b.nonav &&
+            x + 11 > b.x0 &&
+            x - 11 < b.x1 &&
+            z + 11 > b.z0 &&
+            z - 11 < b.z1 &&
+            b.y0 < 3 &&
+            b.y1 > 0,
+        ) ||
         riverDist(x, z) < 12 ||
         hyp(x, z - 8) < 14 ||
         hyp(x - LOBBY.x, z - LOBBY.z) < LOBBY.r + 14
@@ -7692,46 +8930,47 @@ function buildJail() {
     );
   }
   // the lifeboat: last way out, floats off when the island is under water
-  for (const [sx, sz] of [
-    [1, 1],
-    [-1, 1],
-    [1, -1],
-    [-1, -1],
-  ]) {
-    const bx = x + sx * 8.0,
-      bz = z + sz * 8.0;
-    if (hit(bx, 0, bz, 2.4, 3)) continue;
-    const g = new THREE.Group(),
-      mk = (w, h, d, c, px, py, pz) => {
-        const m = new THREE.Mesh(BOX, mat(c));
-        m.scale.set(w, h, d);
-        m.position.set(px, py, pz);
-        m.castShadow = true;
-        g.add(m);
-      };
-    mk(4.2, 0.5, 1.7, 0xe8632c, 0, 0.45, 0);
-    mk(4.4, 0.16, 1.9, 0xffffff, 0, 0.74, 0);
-    mk(0.9, 0.42, 1.2, 0xe8632c, 2.5, 0.5, 0);
-    mk(0.5, 0.34, 0.7, 0xe8632c, 3.1, 0.55, 0);
-    mk(0.5, 0.1, 1.6, 0xb08a55, -1, 0.72, 0);
-    mk(0.5, 0.1, 1.6, 0xb08a55, 0.6, 0.72, 0);
-    mk(0.5, 0.3, 3.0, 0x4a3a28, -1.3, 0.1, 0);
-    mk(0.5, 0.3, 3.0, 0x4a3a28, 1.3, 0.1, 0);
-    g.position.set(bx, 0, bz);
-    g.rotation.y = Math.atan2(sx, sz);
-    scene.add(g);
-    const t = textSprite(
-      "🛟 LIFEBOAT — floats off when the island is flooded",
-      "#ffd23f",
-      38,
-      "rgba(15,20,28,.85)",
-    );
-    t.scale.set(0.45 * t.userData.aspect, 0.45, 1);
-    t.position.set(bx, 2.6, bz);
-    scene.add(t);
-    JAIL.life = { x: bx, z: bz, g, t };
-    break;
-  }
+  if (0)
+    for (const [sx, sz] of [
+      [1, 1],
+      [-1, 1],
+      [1, -1],
+      [-1, -1],
+    ]) {
+      const bx = x + sx * 8.0,
+        bz = z + sz * 8.0;
+      if (hit(bx, 0, bz, 2.4, 3)) continue;
+      const g = new THREE.Group(),
+        mk = (w, h, d, c, px, py, pz) => {
+          const m = new THREE.Mesh(BOX, mat(c));
+          m.scale.set(w, h, d);
+          m.position.set(px, py, pz);
+          m.castShadow = true;
+          g.add(m);
+        };
+      mk(4.2, 0.5, 1.7, 0xe8632c, 0, 0.45, 0);
+      mk(4.4, 0.16, 1.9, 0xffffff, 0, 0.74, 0);
+      mk(0.9, 0.42, 1.2, 0xe8632c, 2.5, 0.5, 0);
+      mk(0.5, 0.34, 0.7, 0xe8632c, 3.1, 0.55, 0);
+      mk(0.5, 0.1, 1.6, 0xb08a55, -1, 0.72, 0);
+      mk(0.5, 0.1, 1.6, 0xb08a55, 0.6, 0.72, 0);
+      mk(0.5, 0.3, 3.0, 0x4a3a28, -1.3, 0.1, 0);
+      mk(0.5, 0.3, 3.0, 0x4a3a28, 1.3, 0.1, 0);
+      g.position.set(bx, 0, bz);
+      g.rotation.y = Math.atan2(sx, sz);
+      scene.add(g);
+      const t = textSprite(
+        "🛟 LIFEBOAT — floats off when the island is flooded",
+        "#ffd23f",
+        38,
+        "rgba(15,20,28,.85)",
+      );
+      t.scale.set(0.45 * t.userData.aspect, 0.45, 1);
+      t.position.set(bx, 2.6, bz);
+      scene.add(t);
+      JAIL.life = { x: bx, z: bz, g, t };
+      break;
+    }
 }
 function jailTo(e, dt, x, z) {
   // reach a point on the raised prison: path to the nearest staircase, then straight up it
@@ -8022,6 +9261,11 @@ function updateCaptives(dt) {
   for (const r of ents) {
     if (!r.cap) continue;
     r.capT += dt;
+    if (r.cap === "out") {
+      if (r.hum)
+        statusTo(r, "🌊 The flood took you — you can only watch now", 0.3);
+      continue;
+    }
     if (r.cap === "down" && r.hum)
       statusTo(
         r,
@@ -8098,8 +9342,8 @@ function updateCaptives(dt) {
       noShip = true;
       msg(
         player.role === "chaser"
-          ? "🔥 All the fuel is gone — the ship can never leave. Catch EVERY runner before the island floods, or they take the lifeboat at the prison"
-          : "🔥 All the fuel is gone — the ship can never leave. Stay free until the island floods: the LIFEBOAT at the prison is the last way out",
+          ? "🔥 All the fuel is gone — the ship can never leave. Catch EVERY runner before the island floods, or they make for the raft"
+          : "🔥 All the fuel is gone — the ship can never leave. Stay free until the island floods: the RAFT on the far shore is the last way out",
         "alarm",
       );
     }
@@ -8314,7 +9558,8 @@ function floodDepth(x, z) {
     : Math.max(0, hyp(x - JAIL.x, z - JAIL.z) - tideR);
 } // how far past the waterline (0 on dry land, on the dock and in the open sea)
 function tideSlow(e) {
-  if (e.pos.y > 0.4 || e.boat || e.zip) return 1;
+  if (e.pos.y > 0.4 || e.boat || e.zip || (FIN.on && e.role === "chaser"))
+    return 1; // in the flood finale the chasers swim at full speed
   const d = floodDepth(e.pos.x, e.pos.z);
   return d <= 0 ? 1 : Math.max(0.5, 0.82 - d * 0.02);
 }
@@ -8468,6 +9713,7 @@ function buildMountain() {
       r = MT.r0 - ((MT.r0 - MT.r1) * k) / (MT.N - 1),
       h = (k + 1) * MT.sh,
       w = clamp(r * MT.da + 0.55, 2.6, 3.8);
+    const stepCol = colAt(h); // v51: both blocks of a step are level with each other, so they must share one colour or the path flickers
     addBox(
       X + Math.cos(a) * r,
       -1.3,
@@ -8475,16 +9721,16 @@ function buildMountain() {
       w,
       h + 1.3,
       w,
-      colAt(h),
+      stepCol,
     );
     addBox(
       X + Math.cos(a) * (r - 1.7),
       -1.3,
       Z + Math.sin(a) * (r - 1.7),
       w,
-      h + 1.3,
+      h + 1.297,
       w,
-      colAt(h),
+      stepCol,
     );
     if (k % 5 === 2 && k < MT.N - 6)
       addBox(
@@ -8535,7 +9781,7 @@ function buildMountain() {
   scene.add(lab);
   MT.lab = lab;
   // monsters
-  for (const u of [10, 23, 36, 49, 62, 74]) {
+  for (const u of [9, 20, 31, 42, 53, 64, 75]) {
     const m = new THREE.Group(),
       bx = (w, h, d, c, px, py, pz, par = m) => {
         const q = new THREE.Mesh(
@@ -8577,6 +9823,8 @@ function buildMountain() {
       dir: 1,
       yaw: 0,
       fall: null,
+      hp: 2,
+      stag: 0,
     });
   }
 }
@@ -8678,8 +9926,9 @@ function updateMountain(dt) {
         m.g.position.set(f.x, f.y, f.z);
         m.g.rotation.x += dt * (f.hit ? 0 : 9);
         if (f.hit) m.g.rotation.x = Math.PI / 2;
-      } else if (f.t > 12) {
+      } else if (f.t > 8) {
         m.fall = null;
+        m.hp = 2;
         m.u = m.home;
         m.g.rotation.x = 0;
         m.g.visible = true;
@@ -8689,10 +9938,16 @@ function updateMountain(dt) {
       } else if (f.t > 4) m.g.visible = false;
       continue;
     }
+    if (m.stag > 0) {
+      m.stag -= dt;
+      m.wind = 0;
+      m.g.rotation.z = m.stag > 0 ? Math.sin(clock * 22) * 0.16 : 0;
+      continue;
+    }
     m.cd -= dt;
     const p = mtP(m.u);
     let tgt = null,
-      bd = 8;
+      bd = 12;
     for (const r of ents) {
       if (r.role !== "runner" || !r.alive || r.cap) continue;
       const d = hyp(r.pos.x - p.x, r.pos.y - p.y, r.pos.z - p.z);
@@ -8707,7 +9962,7 @@ function updateMountain(dt) {
       want = Math.sign(tu - m.u) * (Math.abs(tu - m.u) > 0.6 ? 1 : 0);
       if (tgt.isPlayer && statusT > 900 && bd < 7)
         setStatus(
-          "👹 A mountain monster! PUSH it off (G) or sprint past before it smashes you",
+          "👹 A mountain monster! shove it TWICE (G) or sprint past before it smashes you",
           0.4,
         );
     } else {
@@ -8718,24 +9973,24 @@ function updateMountain(dt) {
       m.wind -= dt;
       want = 0;
       if (m.wind <= 0) {
-        m.cd = 1.6;
-        if (tgt && bd < 1.9) {
+        m.cd = 0.95;
+        if (tgt && bd < 2.4) {
           const dx = tgt.pos.x - p.x,
             dz = tgt.pos.z - p.z,
             l = hyp(dx, dz) || 1;
-          damage(tgt, 7, dx / l, dz / l, 10, "SMASH!");
+          damage(tgt, 14, dx / l, dz / l, 13, "SMASH!");
           sndAt(tgt, { f: 90, d: 0.25, type: "square", v: 0.22, slide: -40 });
           if (tgt.isPlayer) shake = 0.4;
         }
       }
-    } else if (tgt && bd < 1.8 && m.cd <= 0) {
-      m.wind = 0.45;
+    } else if (tgt && bd < 2.1 && m.cd <= 0) {
+      m.wind = 0.3;
       sndAt(p, { f: 160, d: 0.3, type: "sawtooth", v: 0.16, slide: 120 });
     }
     m.u = clamp(
-      m.u + ((want * 2.4) / sp) * dt,
-      Math.max(1, m.home - 6),
-      Math.min(MT.N - 4, m.home + 6),
+      m.u + ((want * 3.8) / sp) * dt,
+      Math.max(1, m.home - 9),
+      Math.min(MT.N - 4, m.home + 9),
     );
     const q = mtP(m.u),
       q2 = mtP(m.u + 0.5 * (want < 0 ? -1 : 1));
@@ -8882,11 +10137,14 @@ function makeCroc(x, z, sea) {
     wx: x,
     wz: z,
     think: 0,
-    sea,
+    sea: sea === true || sea === 1,
+    riv: sea === 2,
   };
 }
+const rivWater = (x, z) => riverDist(x, z) < -0.7 && hyp(x, z) < R_ISLAND - 3;
 function spawnCrocs() {
-  for (let i = 0, tries = 0; i < 6 && tries < 400; tries++) {
+  if (NET.guest) return;
+  for (let i = 0, tries = 0; i < 9 && tries < 500; tries++) {
     const a = rnd(6.283),
       r = tideR + rnd(5, 30),
       x = JAIL.x + Math.cos(a) * r,
@@ -8911,15 +10169,28 @@ const seaWater = (x, z) => {
 let seaCrocsOn = false;
 function spawnSeaCrocs() {
   seaCrocsOn = true;
+  if (NET.guest) return;
   const n0 = crocs.length;
   spawnCrocs.sea = true;
-  for (let i = 0; i < 7; i++) {
-    const a = (i / 7) * 6.283 + 0.4,
+  for (let i = 0; i < 11; i++) {
+    const a = (i / 11) * 6.283 + 0.4,
       r = R_ISLAND + 8,
       x = Math.cos(a) * r,
       z = Math.sin(a) * r;
     if (seaWater(x, z)) crocs.push(makeCroc(x, z, true));
   }
+  for (const [ri, f] of [
+    [0, 0.13],
+    [0, 0.3],
+    [0, 0.47],
+    [0, 0.66],
+    [0, 0.85],
+    [1, 0.3],
+    [1, 0.62],
+  ]) {
+    const q = riverAt(ri, RLEN[ri][RLEN[ri].length - 1] * f);
+    if (rivWater(q.x, q.z)) crocs.push(makeCroc(q.x, q.z, 2));
+  } // the rivers have their own crocodiles
 }
 function updateCrocs(dt) {
   if (!seaCrocsOn && phase === "game") spawnSeaCrocs();
@@ -8928,10 +10199,12 @@ function updateCrocs(dt) {
     c.biteCd -= dt;
     c.think -= dt;
     if (c.think <= 0) {
-      c.think = 0.4;
+      c.think = FIN.on ? 0.2 : 0.4;
       c.tgt = null;
-      let bd = 17;
+      let bd = FIN.on ? 30 : 17;
       if (c.sea) bd = 34;
+      if (c.riv && FIN.on) c.riv = false;
+      if (c.riv) bd = 16;
       for (const r of ents) {
         if (
           r.role !== "runner" ||
@@ -8940,9 +10213,15 @@ function updateCrocs(dt) {
           r.cap ||
           r.boat ||
           r.seat != null ||
-          (c.sea
-            ? r.pos.y > -0.25 || hyp(r.pos.x, r.pos.z) < R_ISLAND + 1.5
-            : r.pos.y > 0.7 || floodDepth(r.pos.x, r.pos.z) < 0.4)
+          r.raft != null ||
+          r.hop ||
+          (c.riv
+            ? r.pos.y > -0.25 ||
+              riverDist(r.pos.x, r.pos.z) > -0.2 ||
+              hyp(r.pos.x, r.pos.z) > R_ISLAND - 2
+            : c.sea
+              ? r.pos.y > -0.25 || hyp(r.pos.x, r.pos.z) < R_ISLAND + 1.5
+              : r.pos.y > 0.7 || floodDepth(r.pos.x, r.pos.z) < 0.4)
         )
           continue;
         const d = hyp(r.pos.x - c.x, r.pos.z - c.z);
@@ -8951,7 +10230,7 @@ function updateCrocs(dt) {
           c.tgt = r;
         }
       }
-      const okW = c.sea ? seaWater : crocWater;
+      const okW = c.riv ? rivWater : c.sea ? seaWater : crocWater;
       if (
         !c.tgt &&
         (hyp(c.wx - c.x, c.wz - c.z) < 1.5 ||
@@ -8970,7 +10249,7 @@ function updateCrocs(dt) {
           }
         }
       }
-      if (!c.sea && !crocWater(c.x, c.z)) {
+      if (!c.sea && !c.riv && !crocWater(c.x, c.z)) {
         const dx = c.x - JAIL.x,
           dz = c.z - JAIL.z,
           l = hyp(dx, dz) || 1;
@@ -8983,13 +10262,15 @@ function updateCrocs(dt) {
       dx = tx - c.x,
       dz = tz - c.z,
       d = hyp(dx, dz),
-      sp = c.tgt ? (c.sea ? 6.2 : 5.4) : 1.6;
+      sp = c.tgt ? (FIN.on ? 7.3 : c.sea ? 6.2 : 5.4) : 1.6;
     if (d > 0.9) {
       const nx = c.x + (dx / d) * sp * dt,
         nz = c.z + (dz / d) * sp * dt,
-        free = c.sea
-          ? (x, z) => hyp(x, z) > R_ISLAND + 0.8 && !hit(x, -0.8, z, 0.5, 1.2)
-          : (x, z) => floodDepth(x, z) > 0.3 && !hit(x, 0, z, 0.5, 0.6);
+        free = c.riv
+          ? (x, z) => riverDist(x, z) < -0.45 && hyp(x, z) < R_ISLAND - 2
+          : c.sea
+            ? (x, z) => hyp(x, z) > R_ISLAND + 0.8 && !hit(x, -0.8, z, 0.5, 1.2)
+            : (x, z) => floodDepth(x, z) > 0.3 && !hit(x, 0, z, 0.5, 0.6);
       if (free(nx, nz)) {
         c.x = nx;
         c.z = nz;
@@ -9001,17 +10282,19 @@ function updateCrocs(dt) {
       c.yaw += da * Math.min(1, dt * 5);
     }
     if (c.tgt && d < 1.9 && c.biteCd <= 0 && c.tgt.alive) {
-      c.biteCd = 2.4;
+      c.biteCd = FIN.on ? 1.6 : 2.4;
       c.jawT = 0.35;
-      damage(c.tgt, 6, dx / (d || 1), dz / (d || 1), 7, "CHOMP!");
+      damage(c.tgt, FIN.on ? 12 : 6, dx / (d || 1), dz / (d || 1), 7, "CHOMP!");
       sndAt(c.tgt, { f: 110, d: 0.2, type: "sawtooth", v: 0.2, slide: -50 });
       puff(c.tgt.pos.x, 0.3, c.tgt.pos.z, 0xbfe6ff, 10, 4);
       if (c.tgt.isPlayer) {
         shake = 0.35;
         setStatus(
-          c.sea
-            ? "🐊 A crocodile bit you — the ocean is theirs, swim back to shore!"
-            : "🐊 A crocodile bit you — get out of the water!",
+          c.riv
+            ? "🐊 A crocodile bit you — get out of the river!"
+            : c.sea
+              ? "🐊 A crocodile bit you — the ocean is theirs, swim back to shore!"
+              : "🐊 A crocodile bit you — get out of the water!",
           2.5,
         );
       }
@@ -9062,7 +10345,9 @@ function blowShip() {
       if (e.alive && !e.stun) e.stun = { type: "slip", t: 1.2 };
     }
     e.wood = 0;
+    e.wet = 0;
     e.iron = 0;
+    e.sail = 0;
     e.fuel = false;
     if (e.ai) e.ai.path = null;
   }
@@ -9081,8 +10366,8 @@ function blowShip() {
   }
   msg(
     player.role === "chaser"
-      ? "🌊 Half the island is under water — the SHIP was swept away! Now catch every runner before the lifeboat floats"
-      : "🌊 Half the island is under water — the SHIP was swept away! Stay free until the flood: the LIFEBOAT at the prison is the last way out",
+      ? "🌊 Half the island is under water — the SHIP was swept away! Catch every runner you can before the flood — then keep them off the raft"
+      : "🌊 Half the island is under water — the SHIP was swept away! Stay free until the flood: the RAFT on the far shore is the last way out",
     "alarm",
   );
   setStatus("🌊 The ship is gone!", 3);
@@ -9112,6 +10397,15 @@ function updateWeather(dt) {
     beep(110, 0.9, "sine", 0.09, 60);
   }
   if (!shipGone && el >= shipGoneT) blowShip();
+  if (!tideTold30 && roundT < 30 && roundT > 0) {
+    tideTold30 = true;
+    msg(
+      player.role === "chaser"
+        ? "🌊 30 seconds to the flood — the prison will burst open and every runner will make for the RAFT (orange on the map)"
+        : "🌊 30 seconds to the flood — get near the prison: the posts from there lead to the RAFT (orange on the map)",
+      "alarm",
+    );
+  }
   if (shipGone && SHIPFX.driftT > 0) {
     SHIPFX.driftT -= dt;
     for (const m of SHIPFX.meshes) {
@@ -9471,10 +10765,1083 @@ function buildCrawl() {
   }
 }
 
+/* ================= v45: campfires for wet planks + the flood finale (parkour course to a raft) ================= */
+const FIRES = [],
+  DRY_T = 10,
+  FIN_T = 120;
+const FIN = { on: false, t: 0, need: 1, cast: 0 },
+  CAST_T = 8;
+const RAFT = {
+  x: 0,
+  z: 0,
+  yaw: 0,
+  v: 0,
+  go: false,
+  g: null,
+  sign: null,
+  oars: [],
+};
+const COURSE = [],
+  RSEAT = [
+    [0, -1.55],
+    [-0.75, 0.95],
+    [0.75, 0.95],
+    [-0.75, -0.25],
+    [0.75, -0.25],
+  ];
+const raftCrew = () => ents.filter((e) => e.raft != null && e.alive);
+function buildFinal() {
+  // ---- campfires: four of them, each a fair walk from the beaches ----
+  for (const ad of [40, 130, 215, 310]) {
+    let F = null;
+    search: for (let r = 0; r <= 16; r += 2)
+      for (let a = 0; a < 6.28; a += 0.5) {
+        const x = Math.cos((ad * Math.PI) / 180) * 66 + Math.cos(a) * r,
+          z = Math.sin((ad * Math.PI) / 180) * 66 + Math.sin(a) * r;
+        if (
+          hit(x, 0, z, 2.2, 3) ||
+          riverDist(x, z) < 5 ||
+          hyp(x - LOBBY.x, z - LOBBY.z) < LOBBY.r + 6 ||
+          hyp(x - JAIL.x, z - JAIL.z) < 30 ||
+          (MT.on && hyp(x - MT.x, z - MT.z) < MT.R + 4)
+        )
+          continue;
+        F = { x, z };
+        break search;
+      }
+    if (!F) continue;
+    const g = new THREE.Group(),
+      mk = (w, h, d, c, px, py, pz, ry = 0, basic = false) => {
+        const m = new THREE.Mesh(
+          BOX,
+          basic ? new THREE.MeshBasicMaterial({ color: c }) : mat(c),
+        );
+        m.scale.set(w, h, d);
+        m.position.set(px, py, pz);
+        m.rotation.y = ry;
+        g.add(m);
+        return m;
+      };
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * 6.283;
+      mk(
+        0.34,
+        0.24,
+        0.34,
+        i % 2 ? 0x8a8479 : 0x6f6a61,
+        Math.cos(a) * 0.85,
+        0.12,
+        Math.sin(a) * 0.85,
+        a,
+      );
+    }
+    mk(1.3, 0.16, 0.2, 0x5a3a1c, 0, 0.14, 0, 0.5);
+    mk(1.3, 0.16, 0.2, 0x4a2f16, 0, 0.2, 0, -0.7);
+    mk(1.2, 0.16, 0.2, 0x5a3a1c, 0, 0.26, 0, 1.9);
+    const fl = new THREE.Group();
+    fl.position.y = 0.3;
+    g.add(fl);
+    const q = (w, h, c, px, pz) => {
+      const m = new THREE.Mesh(BOX, new THREE.MeshBasicMaterial({ color: c }));
+      m.scale.set(w, h, w);
+      m.position.set(px, h / 2, pz);
+      fl.add(m);
+    };
+    q(0.55, 0.7, 0xff7a1a, 0, 0);
+    q(0.36, 1.0, 0xffb020, 0.08, -0.05);
+    q(0.2, 1.25, 0xffe14d, -0.05, 0.06);
+    g.position.set(F.x, 0, F.z);
+    scene.add(g);
+    const t = textSprite(
+      "🔥 CAMPFIRE — dries wet planks",
+      "#ffb020",
+      38,
+      "rgba(15,20,28,.85)",
+    );
+    t.scale.set(0.42 * t.userData.aspect, 0.42, 1);
+    t.position.set(F.x, 2.3, F.z);
+    scene.add(t);
+    FIRES.push({
+      x: F.x,
+      z: F.z,
+      lit: true,
+      use: 0,
+      ping: 0,
+      told: -99,
+      g,
+      fl,
+      t,
+    });
+  }
+  // ---- the course: posts from the prison straight to the shore, along the clearest line ----
+  const J = JAIL;
+  let best = 0,
+    bs = 1e9;
+  for (let d = 0; d < 360; d += 5) {
+    const a = (d * Math.PI) / 180;
+    let bad = 0,
+      len = 0;
+    for (let r = 9; r < 220; r++) {
+      const x = J.x + Math.cos(a) * r,
+        z = J.z + Math.sin(a) * r;
+      if (hyp(x, z) > R_GRASS - 5) break;
+      len = r;
+      if (r > 28 && hit(x, 0, z, 1.3, 3)) bad++;
+      if (
+        riverDist(x, z) < 3.5 ||
+        hyp(x - LOBBY.x, z - LOBBY.z) < LOBBY.r + 5 ||
+        (MT.on && hyp(x - MT.x, z - MT.z) < MT.R + 5) ||
+        hyp(x - DOCK.x, z - DOCK.z) < 40 ||
+        FIRES.some((F) => hyp(F.x - x, F.z - z) < 4)
+      )
+        bad += 40;
+    }
+    const sc = bad * 100 + Math.abs(len - 82);
+    if (sc < bs) {
+      bs = sc;
+      best = a;
+    }
+  }
+  const ca = Math.cos(best),
+    sa = Math.sin(best),
+    HS = [1.4, 1.1, 1.5, 1.2, 1.6, 1.0, 1.4, 1.2],
+    cols = [0x8a5a2b, 0x9a7446, 0x7d7468, 0x6d6459];
+  let r = 8.7,
+    k = 0,
+    lr = 8.7;
+  for (; r < 220; r += 3.9) {
+    const zig = k % 2 ? 0.6 : -0.6;
+    let ok = null;
+    for (const o of [0, 1.7, -1.7, 2.5, -2.5]) {
+      const x = J.x + ca * r - sa * (zig + o),
+        z = J.z + sa * r + ca * (zig + o);
+      if (hyp(x, z) > R_GRASS - 5.5) {
+        ok = 0;
+        break;
+      }
+      if (!hit(x, 0, z, 1.0, 3) && riverDist(x, z) > 2) {
+        ok = { x, z };
+        break;
+      }
+    }
+    if (ok === 0) break;
+    if (!ok) continue;
+    const h = HS[k % HS.length];
+    addBox(ok.x, 0, ok.z, 1.5, h, 1.5, cols[k % 4]);
+    addBox(ok.x, h, ok.z, 1.62, 0.08, 1.62, 0xffd23f, false);
+    addBox(ok.x, h * 0.5, ok.z, 1.56, 0.12, 1.56, 0xc9302c, false);
+    COURSE.push({ x: ok.x, z: ok.z, y: h });
+    k++;
+    lr = r;
+  }
+  // ---- the raft, moored past the last post ----
+  RAFT.x = RAFT.x0 = J.x + ca * (lr + 3.7);
+  RAFT.z = RAFT.z0 = J.z + sa * (lr + 3.7);
+  RAFT.yaw = Math.atan2(RAFT.x, RAFT.z);
+  const g = new THREE.Group(),
+    mk = (w, h, d, c, px, py, pz, par = g) => {
+      const m = new THREE.Mesh(BOX, mat(c));
+      m.scale.set(w, h, d);
+      m.position.set(px, py, pz);
+      m.castShadow = true;
+      par.add(m);
+      return m;
+    };
+  for (let i = 0; i < 6; i++)
+    mk(0.5, 0.34, 4.6, i % 2 ? 0x8a5a2b : 0x7a4d24, -1.3 + i * 0.52, 0.17, 0);
+  mk(3.3, 0.1, 0.3, 0x4a3a28, 0, 0.38, 1.7);
+  mk(3.3, 0.1, 0.3, 0x4a3a28, 0, 0.38, -1.7);
+  mk(3.3, 0.1, 0.3, 0x4a3a28, 0, 0.38, 0);
+  for (const sx of [-1.75, 1.75])
+    for (const sz of [-1.3, 1.3]) mk(0.5, 0.5, 0.9, 0xe8632c, sx, 0.2, sz); // floats
+  mk(0.12, 2.6, 0.12, 0x5a3a1c, 0, 1.6, 0.4);
+  mk(0.9, 0.55, 0.04, 0xff7a1a, 0.5, 2.5, 0.4); // mast + pennant
+  mk(0.12, 0.9, 0.12, 0x5a3a1c, 0, 0.8, -2.1);
+  mk(0.1, 0.1, 1.0, 0x5a3a1c, 0, 1.2, -1.75); // tiller
+  for (const [sx, sz] of [
+    [-1, 0.95],
+    [1, 0.95],
+    [-1, -0.25],
+    [1, -0.25],
+  ]) {
+    const o = new THREE.Group();
+    o.position.set(sx * 1.55, 0.5, sz);
+    g.add(o);
+    mk(1.7, 0.08, 0.1, 0xd8c9a0, sx * 0.6, -0.15, 0, o);
+    mk(0.1, 0.34, 0.5, 0xd8c9a0, sx * 1.4, -0.25, 0, o);
+    o.userData.sx = sx;
+    RAFT.oars.push(o);
+  }
+  g.position.set(RAFT.x, 0.02, RAFT.z);
+  g.rotation.y = RAFT.yaw;
+  scene.add(g);
+  RAFT.g = g;
+  const t = textSprite(
+    "🛟 RAFT — the last way out when the island floods",
+    "#ffd23f",
+    38,
+    "rgba(15,20,28,.85)",
+  );
+  t.scale.set(0.5 * t.userData.aspect, 0.5, 1);
+  t.position.set(RAFT.x, 3.6, RAFT.z);
+  scene.add(t);
+  RAFT.sign = t;
+}
+function nearestFire(e, max = 1e9) {
+  let b = null,
+    bd = max;
+  for (const F of FIRES) {
+    if (!F.lit) continue;
+    const d = hyp(F.x - e.pos.x, F.z - e.pos.z);
+    if (d < bd) {
+      bd = d;
+      b = F;
+    }
+  }
+  return b;
+}
+function dryFirst(e, dt) {
+  // a bot with soaked planks walks to a campfire first; false = nothing to dry (or no fire left)
+  if (!(e.wet > 0)) return false;
+  const F = nearestFire(e);
+  if (!F) {
+    e.wood -= e.wet;
+    e.wet = 0;
+    return false;
+  } // every fire is under water: the wet planks are useless
+  e.run = true;
+  if (e.stance) setStance(e, 0);
+  if (hyp(F.x - e.pos.x, F.z - e.pos.z) < 2.0) e.wx = e.wz = 0;
+  else navTo(e, F.x, F.z, dt);
+  return true;
+}
+function updateFinalFx(dt) {
+  // everything here is looks + the drying rule; runs on every screen
+  for (const F of FIRES) {
+    if (
+      !NET.guest &&
+      F.lit &&
+      phase === "game" &&
+      hyp(F.x - JAIL.x, F.z - JAIL.z) > tideR + 0.5
+    ) {
+      F.lit = false;
+      msg("🌊 The tide put out a campfire");
+    }
+    F.fl.visible = F.lit;
+    F.t.visible = F.lit;
+    const busy = F.lit && F.use > clock;
+    if (F.lit) {
+      const k = 0.85 + Math.sin(clock * 13 + F.x) * 0.15 + (busy ? 0.7 : 0);
+      F.fl.scale.set(k, k * (1 + Math.sin(clock * 9 + F.z) * 0.15), k);
+    }
+    if (busy) {
+      F.g.userData.pT = (F.g.userData.pT || 0) - dt;
+      if (F.g.userData.pT <= 0) {
+        F.g.userData.pT = 0.22;
+        const y = 2 + ((clock * 5) % 14);
+        puff(F.x + rnd(-0.4, 0.4), y, F.z + rnd(-0.4, 0.4), 0x4a4a4a, 4, 1.4);
+        puff(F.x, 1.2, F.z, 0x777777, 2, 1.2);
+      }
+    }
+  }
+  if (!NET.guest && phase === "game" && !FIN.on)
+    for (const e of ents) {
+      if (e.role !== "runner" || !e.alive || !(e.wet > 0) || e.stun) continue;
+      const F = nearestFire(e, 2.9);
+      if (!F) {
+        if (e.hum && e.dryT > 0) e.dryT = Math.max(0, e.dryT - dt);
+        continue;
+      }
+      e.dryT = (e.dryT || 0) + dt;
+      F.use = clock + 0.5;
+      F.ping = clock + 5;
+      if (!e.hum && !e.scared) e.pryT = clock + 0.25;
+      if (e.hum)
+        statusTo(
+          e,
+          `🔥 Drying the planks… ${Math.max(1, Math.ceil(DRY_T - e.dryT))}s — the smoke can be seen from far away`,
+          0.5,
+        );
+      if (clock - F.told > 25) {
+        F.told = clock;
+        msg(
+          "💨 Smoke is rising from a campfire — someone is drying planks there",
+          "alarm",
+        );
+        const bots = chasers
+          .filter((c) => !c.isPlayer && !c.rid && !c.carry && !c.ai.tgt)
+          .sort(
+            (a, b) =>
+              hyp(a.pos.x - F.x, a.pos.z - F.z) -
+              hyp(b.pos.x - F.x, b.pos.z - F.z),
+          );
+        if (
+          bots[0] &&
+          Math.random() < 0.35 + 0.5 * LVL.smart &&
+          hyp(bots[0].pos.x - F.x, bots[0].pos.z - F.z) < 90
+        )
+          bots[0].ai.smoke = { x: F.x, z: F.z, t: clock + 20 };
+      }
+      if (e.dryT >= DRY_T) {
+        e.wet = 0;
+        e.dryT = 0;
+        popText("DRY!", e.pos.x, e.pos.y + 2.5, e.pos.z, "#ffb020", 1);
+        beep(520, 0.2, "sine", 0.07, 200);
+        msg(`🔥 ${e.name} dried planks at a campfire`);
+        if (e.hum)
+          statusTo(e, "🪵 The planks are dry — carry them to the DOCK", 3);
+      }
+    }
+  // the raft
+  if (RAFT.g) {
+    const sea = hyp(RAFT.x, RAFT.z) > R_ISLAND;
+    RAFT.g.position.set(
+      RAFT.x,
+      (FIN.on ? 0.12 : 0.02) +
+        (sea ? -0.3 : 0) +
+        (FIN.on ? Math.sin(clock * 2.1) * 0.05 : 0),
+      RAFT.z,
+    );
+    RAFT.g.rotation.y = RAFT.yaw;
+    RAFT.g.rotation.z = FIN.on ? Math.sin(clock * 1.7) * 0.03 : 0;
+    RAFT.sign.visible = !RAFT.go;
+    const row = RAFT.go ? Math.sin(clock * 6) : 0;
+    for (const o of RAFT.oars) o.rotation.y = row * 0.5 * o.userData.sx;
+  }
+}
+function raftOn(e) {
+  const used = new Set(raftCrew().map((o) => o.raft));
+  let i = 0;
+  while (used.has(i)) i++;
+  if (i >= RSEAT.length) return false;
+  const first = !used.size;
+  e.raft = i;
+  e.rcap = first || !raftCrew().some((o) => o.rcap && o !== e);
+  e.hop = null;
+  e.ci = undefined;
+  e.stance = 0;
+  e.kx = e.kz = 0;
+  const n = used.size + 1;
+  msg(
+    `🛟 ${e.name} is on the raft (${n}/${RSEAT.length})` +
+      (e.rcap ? " — and steers it" : ""),
+    n === 1 ? "alarm" : undefined,
+  );
+  beep(620, 0.2, "sine", 0.07, 200);
+  if (e.hum)
+    statusTo(
+      e,
+      e.rcap
+        ? "🛟 You are the CAPTAIN — when the raft leaves, steer it out to sea with the stick / keys"
+        : "🛟 You are on the raft — you row when it leaves. PUSH (G) shoves a chaser away · JUMP = get off",
+      4,
+    );
+  return true;
+}
+function raftOff(e, by, self) {
+  if (e.raft == null) return;
+  const side = (e.raft % 2 ? -1 : 1) * (self ? 1 : 1),
+    cs = Math.cos(RAFT.yaw),
+    sn = Math.sin(RAFT.yaw);
+  e.raft = null;
+  e.raftCd = 3;
+  const wasCap = e.rcap;
+  e.rcap = false;
+  const x = RAFT.x + cs * side * 2.6,
+    z = RAFT.z - sn * side * 2.6;
+  e.pos.set(x, groundY(x, z), z);
+  e.vy = 0;
+  e.onGround = false;
+  e.wetAt = clock;
+  if (!self) {
+    if (e.alive && !e.stun) e.stun = { type: "slip", t: 1.2 };
+    popText("SPLASH!", x, 2.2, z, "#9fe0ff", 1.1);
+    puff(x, 0.3, z, 0xbfe6ff, 16, 5);
+    sndAt(e, { f: 240, d: 0.3, type: "sine", v: 0.14, slide: -160 });
+    msg(
+      `🌊 ${by ? by.name + " threw " + e.name : e.name + " was knocked"} off the raft!`,
+    );
+    if (e.hum)
+      statusTo(e, "🌊 You are in the water — the crocodiles are coming!", 2.5);
+  }
+  if (wasCap) {
+    const o = raftCrew()[0];
+    if (o) {
+      o.rcap = true;
+      msg(`🛟 ${o.name} takes the tiller`);
+      if (o.hum)
+        statusTo(
+          o,
+          "🛟 You are the CAPTAIN now — steer the raft out to sea",
+          3,
+        );
+    }
+  }
+}
+let finCrocsDone = false,
+  tideTold30 = false;
+function finCrocs() {
+  // four more crocodiles along the course (same places on every screen)
+  if (finCrocsDone || NET.guest) return;
+  finCrocsDone = true;
+  for (let i = 0; i < 6; i++) {
+    const p = COURSE[Math.min(COURSE.length - 1, 2 + i * 3)],
+      q = COURSE[Math.max(0, Math.min(COURSE.length - 1, 2 + i * 3) - 1)];
+    if (!p) break;
+    const dx = p.x - q.x,
+      dz = p.z - q.z,
+      l = hyp(dx, dz) || 1,
+      sd = i % 2 ? 9 : -9,
+      x = p.x - (dz / l) * sd,
+      z = p.z + (dx / l) * sd;
+    if (!hit(x, 0, z, 0.8, 0.8)) crocs.push(makeCroc(x, z, false));
+  }
+}
+function finStart() {
+  FIN.on = true;
+  FIN.t = FIN_T;
+  FIN.need = 1;
+  noShip = true;
+  for (const c of chasers) {
+    if (c.carry) {
+      const r = c.carry;
+      c.carry = null;
+      r.cap = "down";
+      r.by = null;
+      r.pos.set(c.pos.x, c.pos.y, c.pos.z);
+    }
+    c.chain = false;
+    if (c.ai) {
+      c.ai.path = null;
+      c.ai.alarm = 0;
+      c.ai.smoke = null;
+    }
+  }
+  for (const r of ents) {
+    if (r.role !== "runner") continue;
+    if (r.hidden) unhide(r);
+    if (r.seat != null) leaveSeat(r);
+    if (r.boat) leaveBoat(r);
+    r.zip = null;
+    if (r.cap) {
+      r.cap = null;
+      r.by = null;
+      r.alive = true;
+      r.hp = Math.max(r.hp, 70);
+      r.stun = null;
+      r.healed = false;
+      r.resc = 0;
+      r.stance = 0;
+      popText("FREE!", r.pos.x, r.pos.y + 2.8, r.pos.z, "#6fe08a", 1.2);
+      if (r.hum)
+        statusTo(r, "🔓 The flood burst the prison open — get to the RAFT!", 4);
+    }
+    r.wood = r.iron = r.sail = r.wet = 0;
+    r.fuel = false;
+    if (r.raft == null) {
+      r.ci = undefined;
+      r.hop = null;
+    }
+    if (r.ai) {
+      r.ai.path = null;
+      r.ai.hideGo = null;
+      r.ai.tower = null;
+      r.ai.alert = 0;
+    }
+  }
+  JAIL.slots.length = 0;
+  finCrocs();
+  msg(
+    player.role === "chaser"
+      ? "🌊 THE ISLAND IS FLOODED — the prison burst open! Knock the runners off the posts into the water before they reach the RAFT"
+      : "🌊 THE ISLAND IS FLOODED — the prison burst open! Jump from post to post to the RAFT (orange on the map). Stay out of the water",
+    "alarm",
+  );
+  setStatus(
+    player.role === "chaser"
+      ? "🌊 FLOOD! You swim fast now — throw them in the water"
+      : "🌊 FLOOD! Parkour over the posts to the RAFT",
+    4,
+  );
+  thunder();
+  flashT = 0.3;
+  beep(110, 0.9, "sine", 0.09, 60);
+}
+function raftBoard(dt, live) {
+  for (const e of live) {
+    e.raftCd = (e.raftCd || 0) - dt;
+    if (e.raft != null || e.hop) continue;
+    if (e.pos.y < 0.3) e.wetAt = clock;
+    if (
+      e.hum &&
+      !RAFT.go &&
+      e.raftCd <= 0 &&
+      !e.stun &&
+      e.pos.y > 0.5 &&
+      clock - (e.wetAt || 0) > 0.8 &&
+      hyp(e.pos.x - RAFT.x, e.pos.z - RAFT.z) < 3.1
+    )
+      raftOn(e);
+    else if (
+      e.hum &&
+      !RAFT.go &&
+      e.pos.y < 0.5 &&
+      hyp(e.pos.x - RAFT.x, e.pos.z - RAFT.z) < 3.1
+    )
+      statusTo(
+        e,
+        "🛟 You cannot climb aboard from here — jump over from the last post",
+        0.4,
+      );
+  }
+}
+function raftGo(crew) {
+  const n = crew.length;
+  RAFT.go = true;
+  RAFT.v = 0;
+  RAFT.yaw = Math.atan2(RAFT.x, RAFT.z);
+  msg(
+    `🛟 THE RAFT IS AWAY with ${n} aboard — ` +
+      (player.role === "chaser"
+        ? "swim after it and throw them off!"
+        : "row for the open sea!"),
+    "alarm",
+  );
+  beep(880, 0.5, "square", 0.08);
+  for (const e of crew)
+    if (e.hum)
+      statusTo(
+        e,
+        e.rcap
+          ? "🛟 GO! Steer out to sea — away from the chasers"
+          : "🛟 GO! You are rowing",
+        3,
+      );
+}
+function raftMove(dt, crew) {
+  const n = crew.length,
+    cap = crew.find((e) => e.rcap) || crew[0];
+  let want = RAFT.yaw;
+  if (cap.hum) {
+    if (hyp(cap.wx, cap.wz) > 0.3) want = Math.atan2(cap.wx, cap.wz);
+  } else {
+    want = Math.atan2(RAFT.x, RAFT.z);
+    let c = null,
+      bd = 16;
+    for (const o of chasers) {
+      const d = hyp(o.pos.x - RAFT.x, o.pos.z - RAFT.z);
+      if (d < bd && !o.stun) {
+        bd = d;
+        c = o;
+      }
+    }
+    if (c) {
+      let da = Math.atan2(RAFT.x - c.pos.x, RAFT.z - c.pos.z) - want;
+      while (da > Math.PI) da -= 6.283;
+      while (da < -Math.PI) da += 6.283;
+      want += clamp(da, -1, 1) * 0.5;
+    }
+  }
+  let da = want - RAFT.yaw;
+  while (da > Math.PI) da -= 6.283;
+  while (da < -Math.PI) da += 6.283;
+  RAFT.yaw += clamp(da, -1.2 * dt, 1.2 * dt);
+  const sp = 5.4 + 0.7 * Math.min(4, n - 1);
+  RAFT.v += (sp - RAFT.v) * Math.min(1, dt * 1.3);
+  const nx = RAFT.x + Math.sin(RAFT.yaw) * RAFT.v * dt,
+    nz = RAFT.z + Math.cos(RAFT.yaw) * RAFT.v * dt;
+  if (hyp(nx, nz) > R_GRASS - 7 && !hit(nx, 0, nz, 1.7, 1)) {
+    RAFT.x = nx;
+    RAFT.z = nz;
+  } else RAFT.v *= 0.4;
+  if (hyp(RAFT.x, RAFT.z) > R_ISLAND + 40) endFinal(false, "w");
+}
+function raftEarly(dt) {
+  // the last minute before the flood: the raft may leave already, but only with a full crew of five
+  if (!RAFT.open) {
+    RAFT.open = true;
+    RAFT.hx = RAFT.x;
+    RAFT.hz = RAFT.z;
+    msg(
+      player.role === "chaser"
+        ? "🛟 LAST MINUTE — the raft can leave now if 5 runners get aboard. Guard the posts!"
+        : "🛟 LAST MINUTE — the raft can leave NOW if 5 runners get aboard (at the flood one is enough)",
+      "alarm",
+    );
+    beep(660, 0.3, "square", 0.07);
+  }
+  raftBoard(
+    dt,
+    ents.filter((e) => e.role === "runner" && e.alive),
+  );
+  const crew = raftCrew(),
+    n = crew.length;
+  if (!RAFT.go) {
+    const full = n >= RSEAT.length;
+    if (full && !(FIN.cast > 0)) {
+      FIN.cast = 0.01;
+      msg(
+        `🛟 Five runners are on the raft — it casts off in ${CAST_T} seconds!`,
+        "alarm",
+      );
+      beep(660, 0.3, "square", 0.07);
+    }
+    if (!full) FIN.cast = 0;
+    else FIN.cast += dt;
+    if (FIN.cast >= CAST_T) raftGo(crew);
+    return;
+  }
+  if (!n) {
+    RAFT.go = false;
+    RAFT.x = RAFT.hx;
+    RAFT.z = RAFT.hz;
+    RAFT.v = 0;
+    FIN.cast = 0;
+    msg("🛟 The empty raft drifted back to the shore");
+    return;
+  }
+  raftMove(dt, crew);
+}
+function finTick(dt) {
+  if (!FIN.on) finStart();
+  FIN.t -= dt;
+  const live = ents.filter((e) => e.role === "runner" && e.alive);
+  raftBoard(dt, live);
+  const crew = raftCrew(),
+    n = crew.length;
+  for (const e of crew)
+    if (!e.hum && !(e.pushCd > 0) && Math.random() < dt * (1 + 2 * LVL.smart)) {
+      const c = nearestChaser(e);
+      if (
+        c &&
+        !c.stun &&
+        hyp(c.pos.x - e.pos.x, c.pos.z - e.pos.z) < 2.3 &&
+        Math.abs(c.pos.y - e.pos.y) < 1.45
+      )
+        doPush(e);
+    }
+  if (!RAFT.go) {
+    const full = n >= 1; // at the flood one runner aboard is enough: the raft casts off 8 seconds after the first one jumps on (sooner when it is full)
+    if (full && !(FIN.cast > 0)) {
+      FIN.cast = 0.01;
+      msg(
+        `🛟 A runner is on the raft — it casts off in ${CAST_T} seconds!`,
+        "alarm",
+      );
+      beep(660, 0.3, "square", 0.07);
+    }
+    if (FIN.cast > 0 && (n >= RSEAT.length || n >= live.length || FIN.t <= 0))
+      FIN.cast = Math.max(FIN.cast, CAST_T - 2);
+    if (!full && FIN.t > 0) FIN.cast = 0;
+    else if (FIN.cast > 0) FIN.cast += dt;
+    if (FIN.cast >= CAST_T && n > 0) raftGo(crew);
+    else if (FIN.t <= 0 && !n) endFinal(true, "t");
+    return;
+  }
+  if (!n) {
+    endFinal(true, "e");
+    return;
+  }
+  raftMove(dt, crew);
+}
+function endFinal(chWon, why) {
+  if (NET.guest && !NET.endOk) return;
+  if (NET.host) netEnd("f", [chWon ? 1 : 0, why]);
+  const crew = raftCrew(),
+    isCh = player.role === "chaser";
+  if (chWon) endTaunt();
+  if (chWon)
+    showEnd(
+      "👊 CHASERS WIN",
+      (why === "t"
+        ? "Nobody was on the raft when the rope snapped — it drifted away empty."
+        : "Every runner was thrown off the raft before it reached the open sea.") +
+        (isCh ? " You win! 🎉" : " You lose."),
+    );
+  else {
+    // v52: the same kind of send-off as the ship — the raft rows away, the crew wave and tease, the chasers rage in the water
+    phase = "end";
+    $("pause").classList.add("hide");
+    if (document.exitPointerLock) document.exitPointerLock();
+    $("endt").textContent = "🛟 ESCAPED BY RAFT!";
+    $("endp").textContent =
+      `${crew.map((e) => e.name).join(", ")} rowed out to the open sea.` +
+      (isCh
+        ? " You lose."
+        : player.raft != null
+          ? " You win! 🎉"
+          : " (…but the raft left without you.)");
+    if (cine) return;
+    document.body.classList.add("cine");
+    $("sndpanel").classList.add("hide");
+    setStatus("");
+    $("obj").innerHTML = "";
+    const out = Math.atan2(RAFT.x, RAFT.z),
+      ch = chasers
+        .slice()
+        .sort(
+          (a, b) =>
+            hyp(a.pos.x - RAFT.x, a.pos.z - RAFT.z) -
+            hyp(b.pos.x - RAFT.x, b.pos.z - RAFT.z),
+        )
+        .slice(0, 4);
+    cine = {
+      kind: "raft",
+      t: 0,
+      sayT: 0.4,
+      n: 0,
+      out,
+      riders: crew.slice(),
+      ch,
+      cp: ch.map((c, i) => ({
+        x:
+          RAFT.x -
+          Math.sin(out) * (6.5 + (i >> 1) * 2.2) +
+          Math.cos(out) * (i % 2 ? 1.5 : -1.5) * (1 + (i >> 1) * 0.5),
+        z:
+          RAFT.z -
+          Math.cos(out) * (6.5 + (i >> 1) * 2.2) -
+          Math.sin(out) * (i % 2 ? 1.5 : -1.5) * (1 + (i >> 1) * 0.5),
+      })),
+    };
+  }
+}
+function raftCine(dt) {
+  const C = cine;
+  C.t += dt;
+  if (C.t > 4.5 && !C.shown) {
+    C.shown = true;
+    $("end").classList.add("esc");
+    $("end").classList.remove("hide");
+  }
+  let da = C.out - RAFT.yaw;
+  while (da > Math.PI) da -= 6.283;
+  while (da < -Math.PI) da += 6.283;
+  RAFT.yaw += clamp(da, -0.9 * dt, 0.9 * dt);
+  const v =
+      C.t < 9
+        ? Math.min(6, 2.5 + C.t * 1.2)
+        : Math.max(2.2, 6 - (C.t - 9) * 1.1),
+    sn = Math.sin(RAFT.yaw),
+    cs = Math.cos(RAFT.yaw);
+  RAFT.x += sn * v * dt;
+  RAFT.z += cs * v * dt;
+  if (RAFT.g) {
+    RAFT.g.position.set(RAFT.x, RAFT.g.position.y, RAFT.z);
+    RAFT.g.rotation.y = RAFT.yaw;
+  }
+  const ry = RAFT.g ? RAFT.g.position.y + 0.6 : 0.42;
+  C.riders.forEach((e, i) => {
+    const o = RSEAT[(e.raft != null ? e.raft : i) % RSEAT.length],
+      V = e.v,
+      w = Math.sin(C.t * 10 + i * 1.7);
+    e.pos.set(
+      RAFT.x + o[0] * cs + o[1] * sn,
+      ry,
+      RAFT.z - o[0] * sn + o[1] * cs,
+    );
+    e.vy = 0;
+    e.stun = null;
+    e.yaw = RAFT.yaw + Math.PI;
+    V.g.visible = true;
+    V.g.position.copy(e.pos);
+    V.g.rotation.y = e.yaw; // they look back at the island
+    V.body.position.set(0, 0, 0);
+    V.body.rotation.set(0, 0, 0);
+    V.body.scale.set(1, 1, 1);
+    V.legL.rotation.x = w * 0.15;
+    V.legR.rotation.x = -w * 0.15;
+    V.armR.rotation.x = Math.PI + w * 0.25;
+    V.armR.rotation.z = -0.25 + w * 0.35;
+    V.armL.rotation.x = i % 2 ? Math.PI - w * 0.25 : -0.4;
+    V.armL.rotation.z = i % 2 ? 0.25 - w * 0.35 : 0;
+    V.head.rotation.z = w * 0.15;
+  });
+  C.ch.forEach((c, i) => {
+    const V = c.v,
+      w = Math.sin(C.t * 13 + i * 2.1),
+      q = C.cp[i];
+    c.pos.set(q.x, ry - 1.75 + Math.abs(Math.sin(C.t * 5 + i)) * 0.35, q.z);
+    c.vy = 0;
+    c.stun = null;
+    c.yaw = Math.atan2(RAFT.x - q.x, RAFT.z - q.z);
+    V.g.visible = true;
+    V.g.position.copy(c.pos);
+    V.g.rotation.y = c.yaw; // up to the chest in the water, shaking their fists
+    V.body.position.set(0, 0, 0);
+    V.body.rotation.set(0.1, 0, 0);
+    V.body.scale.set(1, 1, 1);
+    V.armL.rotation.x = Math.PI + w * 0.5;
+    V.armR.rotation.x = Math.PI - w * 0.5;
+    V.armL.rotation.z = V.armR.rotation.z = 0;
+    V.legL.rotation.x = w * 0.4;
+    V.legR.rotation.x = -w * 0.4;
+    V.head.rotation.z = w * 0.12;
+    if (Math.random() < dt * 5)
+      puff(
+        q.x + rnd(-0.6, 0.6),
+        ry - 0.35,
+        q.z + rnd(-0.6, 0.6),
+        0xffffff,
+        2,
+        1.6,
+      );
+  });
+  C.sayT -= dt;
+  if (C.sayT <= 0) {
+    C.sayT = C.t < 7.4 ? 0.75 : 1.6;
+    C.n++;
+    if (C.n % 3 && C.riders.length) {
+      const r = C.riders[Math.floor(rnd(C.riders.length))];
+      popText(
+        [
+          "BYE BYE! 👋",
+          "TOO SLOW! 😜",
+          "SEE YA!",
+          "CATCH US NOW!",
+          "NA NA NA! 😝",
+          "HA HA HA!",
+          "ROW ROW ROW!",
+        ][Math.floor(rnd(7))],
+        r.pos.x,
+        ry + 2.6 + rnd(0.6),
+        r.pos.z,
+        "#7dffa0",
+        1.0,
+      );
+      beep(520 + rnd(260), 0.12, "sine", 0.05, 200);
+    } else if (C.ch.length) {
+      const c = C.ch[Math.floor(rnd(C.ch.length))];
+      popText(
+        ["NOOO!", "COME BACK!", "GRRRR! 😡", "NEXT TIME!", "BLUB BLUB!"][
+          Math.floor(rnd(5))
+        ],
+        c.pos.x,
+        ry + 1.6,
+        c.pos.z,
+        "#ff8a80",
+        1.0,
+      );
+      beep(150, 0.25, "sawtooth", 0.05, -40);
+    }
+  }
+  const sm = clamp((C.t - 4) / 3.5, 0, 1),
+    s2 = sm * sm * (3 - 2 * sm),
+    a = Math.min(1, C.t / 7); // first the send-off with the chasers in view, then the camera travels with the raft
+  const so = Math.sin(C.out),
+    co = Math.cos(C.out),
+    back = 5.5 * (1 - s2) - 1.5 * s2,
+    side = 11 + a * 2 - s2 * 2;
+  camera.position.set(
+    RAFT.x - so * back + co * side,
+    ry + 4.2 + a * 2 - s2 * 1.2,
+    RAFT.z - co * back - so * side,
+  );
+  camera.lookAt(
+    RAFT.x - so * (3.2 * (1 - s2)),
+    ry + 0.9,
+    RAFT.z - co * (3.2 * (1 - s2)),
+  );
+  {
+    const W = innerWidth,
+      Hh = innerHeight,
+      wide = W > 760 && W > Hh,
+      k = wide ? 0.27 * s2 : 0,
+      ky = wide ? 0 : 0.16 * s2;
+    if (k || ky) camera.setViewOffset(W, Hh, -W * k, -Hh * ky, W, Hh);
+    else if (camera.view) camera.clearViewOffset();
+  }
+  if (Math.random() < dt * 14)
+    puff(
+      RAFT.x - sn * 2.4 + rnd(-0.8, 0.8),
+      ry - 0.35,
+      RAFT.z - cs * 2.4 + rnd(-0.8, 0.8),
+      0xffffff,
+      2,
+      1.5,
+    ); // wake
+  sun.position.set(RAFT.x + 40, 70, RAFT.z + 25);
+  sun.target.position.set(RAFT.x, 0, RAFT.z);
+  sun.target.updateMatrixWorld();
+}
+function aiRunnerFin(e, dt) {
+  // bot runner in the flood: get onto the posts, hop along them, board the raft
+  const ai = e.ai;
+  e.run = true;
+  if (e.stance) setStance(e, 0);
+  if (e.raft != null || e.hop) {
+    e.wx = e.wz = 0;
+    return;
+  }
+  const n = COURSE.length,
+    taken = (k) =>
+      ents.some(
+        (o) =>
+          o !== e &&
+          o.role === "runner" &&
+          o.alive &&
+          (o.ci === k || (o.hop && o.hop.ci === k)),
+      );
+  const hop = (tx, ty, tz, ci, raft) => {
+    const d = hyp(tx - e.pos.x, tz - e.pos.z);
+    e.hop = {
+      fx: e.pos.x,
+      fy: e.pos.y,
+      fz: e.pos.z,
+      tx,
+      ty,
+      tz,
+      t: 0,
+      dur: 0.34 + d * 0.045,
+      arc: 0.9 + d * 0.08,
+      ci,
+      raft: !!raft,
+    };
+    e.wx = e.wz = 0;
+  };
+  let ci = e.ci;
+  if (ci != null) {
+    const p = COURSE[ci];
+    if (
+      !p ||
+      hyp(e.pos.x - p.x, e.pos.z - p.z) > 1.0 ||
+      Math.abs(e.pos.y - p.y) > 0.35
+    )
+      ci = e.ci = undefined;
+  }
+  if (ci != null) {
+    e.wx = e.wz = 0;
+    ai.hopW = (ai.hopW || 0) - dt;
+    if (ai.hopW > 0) return;
+    ai.hopW = rnd(0.15, 0.55) * (1.5 - 0.6 * LVL.smart);
+    if (ci === n - 1) {
+      if (RAFT.go || raftCrew().length >= RSEAT.length || e.raftCd > 0) return;
+      hop(RAFT.x, 0.42, RAFT.z, -1, true);
+      return;
+    }
+    if (taken(ci + 1)) return;
+    const q = COURSE[ci + 1];
+    if (Math.random() < 0.08 - 0.05 * LVL.smart) {
+      const dx = q.x - e.pos.x,
+        dz = q.z - e.pos.z,
+        l = hyp(dx, dz) || 1,
+        sd = Math.random() < 0.5 ? 1.5 : -1.5;
+      hop(q.x - (dz / l) * sd, 0, q.z + (dx / l) * sd, -1);
+    } // misjudged it
+    else hop(q.x, q.y, q.z, ci + 1);
+    return;
+  }
+  const onJail = e.pos.y > 1.2 && hyp(e.pos.x - JAIL.x, e.pos.z - JAIL.z) < 8;
+  let k = 0,
+    bd = 1e9;
+  if (!onJail)
+    for (let i = 0; i < n; i++) {
+      const d = hyp(COURSE[i].x - e.pos.x, COURSE[i].z - e.pos.z) - i * 0.4;
+      if (d < bd) {
+        bd = d;
+        k = i;
+      }
+    }
+  const p = COURSE[k],
+    d = hyp(p.x - e.pos.x, p.z - e.pos.z);
+  if (ai.wand && ai.wand.t > 0) {
+    ai.wand.t -= dt;
+    e.wx = Math.cos(ai.wand.a);
+    e.wz = Math.sin(ai.wand.a);
+    if (e.onGround && Math.random() < dt * 2) e.wantJump = true;
+    return;
+  }
+  ai.fsT = (ai.fsT || 0) + dt;
+  if (ai.fsT > 1.6) {
+    if (ai.fsP && hyp(e.pos.x - ai.fsP.x, e.pos.z - ai.fsP.z) < 1 && d > 3) {
+      ai.wand = {
+        a: Math.atan2(p.z - e.pos.z, p.x - e.pos.x) + rnd(-1.7, 1.7),
+        t: 1.3,
+      };
+      ai.path = null;
+    }
+    ai.fsT = 0;
+    ai.fsP = { x: e.pos.x, z: e.pos.z };
+  }
+  if (d < 2.8 && e.onGround) {
+    if (!taken(k)) hop(p.x, p.y, p.z, k);
+    else if (
+      k < n - 1 &&
+      hyp(COURSE[k + 1].x - e.pos.x, COURSE[k + 1].z - e.pos.z) < 4.6 &&
+      !taken(k + 1)
+    )
+      hop(COURSE[k + 1].x, COURSE[k + 1].y, COURSE[k + 1].z, k + 1);
+    else e.wx = e.wz = 0;
+  } else if (onJail || d < 14) {
+    moveTo(e, p.x, p.z);
+    stuckCheck(e, dt);
+  } else navTo(e, p.x, p.z, dt);
+}
+function aiChaserFin(e, dt) {
+  // bot chaser in the flood: swim to the nearest runner and knock him into the water; once the raft is away, go for the raft
+  const ai = e.ai;
+  e.run = true;
+  ai.climb = false;
+  if (e.stance) setStance(e, 0);
+  let tgt = null,
+    bd = 1e9;
+  for (const r of ents) {
+    if (r.role !== "runner" || !r.alive) continue;
+    let d = hyp(r.pos.x - e.pos.x, r.pos.z - e.pos.z);
+    if (r.raft != null) d -= RAFT.go ? 60 : 8;
+    else if (RAFT.go) d += 40;
+    if (r === ai.tgt) d -= 3;
+    if (chasers.some((o) => o !== e && o.ai && o.ai.tgt === r) && !RAFT.go)
+      d += 7;
+    if (d < bd) {
+      bd = d;
+      tgt = r;
+    }
+  }
+  ai.tgt = tgt;
+  if (!tgt) {
+    e.wx = e.wz = 0;
+    return;
+  }
+  const dx = tgt.pos.x - e.pos.x,
+    dz = tgt.pos.z - e.pos.z,
+    d = hyp(dx, dz) || 0.01,
+    dy = tgt.pos.y - e.pos.y;
+  if (d < 2.2 && Math.abs(dy) < 1.65) {
+    e.wx = (dx / d) * 0.2;
+    e.wz = (dz / d) * 0.2;
+    if (!e.atk) e.yaw = Math.atan2(dx, dz);
+    if (ai.react <= 0 && !e.atk && e.cd <= 0) {
+      ai.react = rnd(LVL.react[0], LVL.react[1]) + 0.35;
+      if (
+        e.pushCd <= 0 &&
+        Math.abs(dy) < 1.45 &&
+        (tgt.raft != null || Math.random() < 0.45) &&
+        !chasers.some(
+          (o) => o !== e && hyp(o.pos.x - e.pos.x, o.pos.z - e.pos.z) < d,
+        )
+      )
+        doPush(e);
+      else startAttack(e, Math.random() < 0.5 ? "kick" : "punch");
+    }
+    return;
+  }
+  if (d < 3.2 && dy > 1.0 && e.onGround) e.wantJump = true;
+  if (
+    d < 22 ||
+    hyp(e.pos.x, e.pos.z) > R_GRASS - 10 ||
+    hyp(tgt.pos.x, tgt.pos.z) > R_GRASS - 3
+  ) {
+    e.wx = dx / d;
+    e.wz = dz / d;
+    stuckCheck(e, dt);
+  } else navTo(e, tgt.pos.x, tgt.pos.z, dt);
+}
 buildWorld();
 buildExtras();
 buildLobby();
 buildMountain();
+buildFinal();
 buildNav();
 buildNavC();
 TIDE0 = R_ISLAND + hyp(JAIL.x, JAIL.z) + 2;
@@ -9691,7 +12058,7 @@ function menuScene(dt, stop) {
 }
 function frame(now, bg) {
   if (!bg) requestAnimationFrame(frame);
-  const dt = Math.min(0.05, (now - lastT) / 1000);
+  const dt = Math.max(0, Math.min(0.05, (now - lastT) / 1000));
   lastT = now;
   clock += dt;
   if (phase === "menu") {
@@ -9720,17 +12087,34 @@ function frame(now, bg) {
       beep(880, 0.4, "square", 0.08);
     }
   } else if (phase === "game") {
-    roundT -= dt;
+    if (!XP.on || XP.run) roundT -= dt;
     trapRegen += dt;
+    if (XP.on) {
+      if (player.hp < 40) player.hp = 100;
+      if (XP.fast) player.boost = 0.5;
+    }
     if (trapRegen > 22) {
       trapRegen = 0;
       if (trapBudget < 4) trapBudget++;
     }
     if (!ents.some((e) => e.role === "runner" && e.alive)) endGame(true);
-    else if (roundT <= 0) endRescue();
-    else updateWeather(dt);
+    else {
+      if (roundT <= 0) {
+        roundT = 0;
+        if (!NET.guest) finTick(dt);
+      } else if (roundT <= 60 && !NET.guest) raftEarly(dt);
+      if (phase === "game") updateWeather(dt);
+    }
   }
   for (const e of ents) {
+    if (XP.on && !e.isPlayer && e.role !== "decoy") {
+      if (e.v.g.visible) {
+        e.v.g.visible = false;
+        e.pos.set(400, 90, 400);
+        e.wx = e.wz = 0;
+      }
+      continue;
+    } // explore mode: nobody else is on the island
     if (NET.guest) {
       if (e.isPlayer) {
         if (e.alive && phase !== "end") playerInput(e);
@@ -9777,6 +12161,7 @@ function frame(now, bg) {
       e.scared =
         phase === "game" && hyp(c.pos.x - e.pos.x, c.pos.z - e.pos.z) < 16;
     }
+    if (e.pryT > clock) e.wx = e.wz = 0; // a bot stands at the crate until it is open
     stepEnt(e, dt);
     updateVisual(e, dt);
   }
@@ -9809,6 +12194,15 @@ function frame(now, bg) {
 }
 /* ================= multiplayer: the room creator's browser runs the round, everyone else mirrors it ================= */
 const NSKIP = new Set([
+  "shipT",
+  "shipP",
+  "shipN",
+  "pryT",
+  "hop",
+  "ci",
+  "wetAt",
+  "raftCd",
+  "dryT",
   "v",
   "label",
   "ai",
@@ -9940,6 +12334,7 @@ const NG = {
       boatT,
       woodDone,
       ironDone,
+      sailDone,
       chainsMade,
       readyTold,
       shipGone,
@@ -9952,6 +12347,7 @@ const NG = {
       flashT,
       tideWarn,
       seaCrocsOn,
+      crocS: crocs.map((c) => (c.riv ? 2 : c.sea ? 1 : 0)).join(""),
     };
   },
   set(o) {
@@ -9961,10 +12357,14 @@ const NG = {
     if (h("trapBudget")) trapBudget = o.trapBudget;
     if (h("shipWait")) shipWait = o.shipWait;
     if (h("ironN")) ironN = o.ironN;
+    if (h("crocS"))
+      for (let i = crocs.length; i < o.crocS.length; i++)
+        crocs.push(makeCroc(0, -500, +o.crocS[i])); // crocodiles exist on the host first; every other screen gets the same ones
     if (h("fuelDone")) fuelDone = o.fuelDone;
     if (h("boatT")) boatT = o.boatT;
     if (h("woodDone")) woodDone = o.woodDone;
     if (h("ironDone")) ironDone = o.ironDone;
+    if (h("sailDone")) sailDone = o.sailDone;
     if (h("chainsMade")) chainsMade = o.chainsMade;
     if (h("readyTold")) readyTold = o.readyTold;
     if (h("shipGone")) shipGone = o.shipGone;
@@ -10019,7 +12419,8 @@ function netBegin(mp) {
     ladders,
     towers,
     mons: MT.mons,
-    one: [CHAIN, JAIL, SHIP, MT, SHIPFX],
+    fires: FIRES,
+    one: [CHAIN, JAIL, SHIP, MT, SHIPFX, FIN, RAFT],
   };
   NET.regIdx = new Map();
   for (const n in NET.reg)
@@ -10112,7 +12513,14 @@ function netHostFrame(dt) {
   }
   const g = ndelta("G", NG.get());
   if (g) o.g = g;
-  const its = items.map((i) => [i.type, r3(i.x), r3(i.z), r3(i.y)]),
+  const its = items.map((i) => [
+      i.type,
+      r3(i.x),
+      r3(i.z),
+      r3(i.y),
+      i.crate ? 1 : 0,
+      i.wet ? 1 : 0,
+    ]),
     isg = JSON.stringify(its);
   if (isg !== NET.itSig) {
     NET.itSig = isg;
@@ -10259,6 +12667,7 @@ function netFree(e) {
     !e.stun &&
     !e.cap &&
     e.seat == null &&
+    e.raft == null &&
     !e.zip &&
     !e.boat &&
     !e.hidden &&
@@ -10284,6 +12693,7 @@ function netPredict(e, dt) {
   let sp = (e.run ? (e.role === "chaser" ? 8.4 : 8.0) : 4.3) * SPD[e.stance];
   if (e.fuel) sp *= 0.82;
   if (e.chain) sp *= 0.88;
+  if (e.sail) sp *= 0.9;
   if (e.wood) sp *= 1 - 0.035 * e.wood;
   if (e.iron) sp *= 1 - 0.05 * e.iron;
   sp *= tideSlow(e);
@@ -10294,11 +12704,15 @@ function netPredict(e, dt) {
     sp *=
       hyp(e.pos.x, e.pos.z) > R_ISLAND
         ? e.role === "chaser"
-          ? 0.6
+          ? FIN.on
+            ? 0.8
+            : 0.6
           : 0.45
         : e.role === "chaser"
-          ? 0.5
-          : 0.8;
+          ? FIN.on
+            ? 0.9
+            : 0.5
+          : 0.5;
   if (e.atk) sp *= 0.35;
   if (wl > 0.05 && !e.atk) {
     const ty = Math.atan2(wx, wz);
@@ -10330,10 +12744,11 @@ function netPredict(e, dt) {
       e.pos.z = LOBBY.z + (dz / d) * (LOBBY.r + 1.2);
     }
   }
-  const rr = hyp(e.pos.x, e.pos.z);
-  if (rr > R_ISLAND + 14) {
-    e.pos.x *= (R_ISLAND + 14) / rr;
-    e.pos.z *= (R_ISLAND + 14) / rr;
+  const rr = hyp(e.pos.x, e.pos.z),
+    rmax = R_ISLAND + (FIN.on || RAFT.go ? 46 : 14);
+  if (rr > rmax) {
+    e.pos.x *= rmax / rr;
+    e.pos.z *= rmax / rr;
   }
   e.vy -= GRAV * dt;
   let ny = e.pos.y + e.vy * dt;
@@ -10520,6 +12935,7 @@ function netEvent(ev) {
     try {
       if (ev[1] === "g") endGame(ev[2]);
       else if (ev[1] === "r") endRescue();
+      else if (ev[1] === "f") endFinal(!!ev[2][0], ev[2][1]);
       else if (ev[1] === "e")
         endEscape(ev[2].map((i) => NET.byId.get(i)).filter(Boolean));
     } finally {
@@ -10541,13 +12957,16 @@ function netItems(list) {
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i],
       kk = key(it.type, it.x, it.z, it.y);
-    if (want.has(kk)) want.delete(kk);
-    else {
+    if (want.has(kk)) {
+      if (!want.get(kk)[4] && it.crate) openCrate(it);
+      want.delete(kk);
+    } else {
       scene.remove(it.g);
       items.splice(i, 1);
     }
   }
-  for (const a of want.values()) spawnItem(a[0], a[1], a[2], a[3]);
+  for (const a of want.values())
+    spawnItem(a[0], a[1], a[2], a[3], !!a[4], !!a[5]);
 }
 function netTraps(list) {
   const used = new Set();
@@ -10983,8 +13402,37 @@ function useBolt(e, ...a) {
 NCALL.useBolt = useBolt_;
 requestAnimationFrame(frame);
 window.__game = {
+  colliders,
+  bridges,
+  spots,
+  tramps,
+  riverDist,
   NET,
   MENU,
+  FIN,
+  RAFT,
+  COURSE,
+  FIRES,
+  raftCrew,
+  LVL: () => LVL,
+  sim(n) {
+    const rr = renderer.render;
+    renderer.render = () => {};
+    try {
+      for (let i = 0; i < n && phase !== "end"; i++) {
+        lastT = performance.now() - 50;
+        frame(performance.now(), true);
+      }
+    } finally {
+      renderer.render = rr;
+    }
+  },
+  get sailDone() {
+    return sailDone;
+  },
+  set sailDone(v) {
+    sailDone = v;
+  },
   get clock() {
     return clock;
   },
