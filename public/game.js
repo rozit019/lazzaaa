@@ -60,9 +60,11 @@ const hyp = Math.hypot;
 
 const canvas = $("c");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.autoUpdate = false;
+renderer.shadowMap.needsUpdate = true; // shadows refresh every 2nd frame
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x8fd0f5);
 scene.fog = new THREE.Fog(0x8fd0f5, 90, 300);
@@ -72,6 +74,31 @@ function resize() {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
 }
+/* adaptive quality: if the frame rate stays low, step the render resolution down (and back up when there is headroom) */
+const Q = { r: Math.min(devicePixelRatio || 1, 1.5), t: 0, n: 0, up: 0, sh: 0 };
+function qTick(rawDt) {
+  if (rawDt > 0 && rawDt < 0.25) {
+    Q.t += rawDt;
+    Q.n++;
+  }
+  if (Q.n >= 90) {
+    const fps = Q.n / Q.t;
+    Q.t = 0;
+    Q.n = 0;
+    if (fps < 45 && Q.r > 0.81) {
+      Q.r = Math.max(0.8, Q.r - 0.25);
+      renderer.setPixelRatio(Q.r);
+      Q.up = 0;
+    } else if (fps > 58 && Q.r < 1.49) {
+      if (++Q.up >= 3) {
+        Q.r = Math.min(1.5, Q.r + 0.25);
+        renderer.setPixelRatio(Q.r);
+        Q.up = 0;
+      }
+    } else Q.up = 0;
+  }
+  renderer.shadowMap.needsUpdate = (Q.sh = (Q.sh + 1) % 2) === 0;
+}
 addEventListener("resize", resize);
 resize();
 
@@ -79,7 +106,7 @@ const hemi = new THREE.HemisphereLight(0xdff2ff, 0x6b8f5a, 1.5);
 scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xfff3d6, 2.2);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.mapSize.set(1024, 1024);
 const sc = sun.shadow.camera;
 sc.left = -55;
 sc.right = 55;
@@ -1927,9 +1954,14 @@ function setFace(e) {
   v.browL.position.y = v.browR.position.y = by;
   v.browL.rotation.z = bz;
   v.browR.rotation.z = -bz;
+  if (e.sayT > 0) {
+    mw = 0.21;
+    mh = 0.07 + 0.075 * Math.abs(Math.sin(clock * 13));
+  } // talking: the mouth opens and closes
   v.mouth.scale.set(mw, mh, 0.03);
 }
 function updateVisual(e, dt) {
+  if (e.sayT > 0) e.sayT -= dt;
   setFace(e);
   const v = e.v,
     b = v.body;
@@ -2091,6 +2123,7 @@ function doHit(e, type) {
       popText("not yet!", r.pos.x, r.pos.y + 2.4, r.pos.z, "#fff", 0.5);
       continue;
     }
+    r.caughtBy = e;
     damage(
       r,
       type === "punch" ? 9 : 15,
@@ -2100,10 +2133,11 @@ function doHit(e, type) {
       type === "punch"
         ? ["POW!", "BAM!", "WHACK!"][Math.floor(rnd(3))]
         : "KICK!",
+      true,
     );
   }
 }
-function damage(r, dmg, dx, dz, kb, text) {
+function damage(r, dmg, dx, dz, kb, text, beat) {
   if (r.seat != null) leaveSeat(r);
   if (r.role === "decoy") {
     popDecoy(r);
@@ -2135,6 +2169,7 @@ function damage(r, dmg, dx, dz, kb, text) {
   );
   puff(r.pos.x, r.pos.y + 1.3, r.pos.z, 0xffe14d, 5, 2.5);
   thud(r, kb > 8 ? 1.25 : 1);
+  if (beat) playHit(r);
   r.ai.alert = 8;
   if (r.isPlayer) {
     $("flash").style.opacity = 1;
@@ -2144,6 +2179,8 @@ function damage(r, dmg, dx, dz, kb, text) {
   if (r.hp <= 0) knockOut(r);
 }
 function knockOut(r) {
+  if (r.caughtBy && r.caughtBy.alive && r.caughtBy.role === "chaser")
+    say(r.caughtBy, HAH); // caught you: the chaser laughs
   r.hp = 0;
   r.alive = false;
   r.stun = null;
@@ -4683,6 +4720,7 @@ function setPause(v) {
     netHostFrame(0);
   }
   paused = v;
+  musApply();
   $("paused").classList.toggle("hide", !v);
   if (v) {
     for (const k in keys) keys[k] = false;
@@ -4911,6 +4949,7 @@ function start0(role, mp) {
     if (p) spawnItem(t, p.x, p.z);
   }
   phase = "lobby";
+  musPlay("ingame");
   $("pause").classList.remove("hide");
   const others = chasers
     .filter((c) => !c.isPlayer)
@@ -5008,6 +5047,7 @@ function endGame(chaserWon) {
   const left = ents.filter((e) => e.role === "runner" && e.alive).length;
   const iWon =
     player.role === "chaser" ? chaserWon : !chaserWon && player.alive;
+  musPlay(iWon ? "victory" : "defeat");
   $("endt").textContent = chaserWon ? "👊 CHASERS WIN" : "🏃 RUNNERS SURVIVE";
   $("endp").textContent =
     (chaserWon
@@ -5208,12 +5248,13 @@ function updateHud(dt) {
     .querySelector("[data-a=prone]")
     .classList.toggle("on", p.stance === 2);
   $("skip").classList.toggle("hide", phase !== "lobby");
-  drawMap();
+  if ((drawMap.n = (drawMap.n || 0) + 1) % 5 === 0) drawMap(); // minimap 12x/s is plenty
 }
 
 /* camera */
 const camPos = new THREE.Vector3(0, 8, 80),
-  camTgt = new THREE.Vector3(0, 1, 64);
+  camTgt = new THREE.Vector3(0, 1, 64),
+  _cv = new THREE.Vector3();
 function updateCamera(dt) {
   const f =
     player.alive || player.cap || phase === "end"
@@ -5221,7 +5262,7 @@ function updateCamera(dt) {
       : nearestChaser(player);
   const hang = f.stun && f.stun.type === "hang",
     ty = f.pos.y + (hang ? 2.6 : H[f.stance] * 0.85 + 0.35);
-  camTgt.lerp(new THREE.Vector3(f.pos.x, ty, f.pos.z), Math.min(1, dt * 14));
+  camTgt.lerp(_cv.set(f.pos.x, ty, f.pos.z), Math.min(1, dt * 14));
   const cp = Math.cos(camPitch),
     dx = Math.sin(camYaw) * cp,
     dy = Math.sin(camPitch),
@@ -6150,7 +6191,7 @@ function searchSpots(e) {
       const dx = s.x - e.pos.x,
         dz = s.z - e.pos.z,
         l = hyp(dx, dz) || 1;
-      damage(r, 12, dx / l, dz / l, 12, "DRAGGED OUT!");
+      damage(r, 12, dx / l, dz / l, 12, "DRAGGED OUT!", true);
     }
     if (!r.alive) continue;
     r.stun = { type: "slip", t: 0.9 };
@@ -6670,7 +6711,8 @@ function specialMove(e, dt) {
         hyp(r.pos.x - e.pos.x, r.pos.z - e.pos.z) < 1.5 &&
         Math.abs(r.pos.y - e.pos.y) < 1.6
       ) {
-        damage(r, 13, c.dx, c.dz, 13, "TACKLE!");
+        r.caughtBy = e;
+        damage(r, 13, c.dx, c.dz, 13, "TACKLE!", true);
         if (
           r.alive &&
           r.role === "runner" &&
@@ -6727,6 +6769,7 @@ function afterMove(e, dt) {
       e.kz = Math.cos(e.yaw) * 9;
       e.atk = null;
       e.charge = null;
+      playVoiceAt(SLIP.a, e, 1);
       popText("SLIP!", e.pos.x, e.pos.y + 2.5, e.pos.z, "#ffe135", 1.1);
       msg(`🍌 ${e.name} slipped on a banana peel!`);
       beep(400, 0.3, "sawtooth", 0.07, -300);
@@ -7588,6 +7631,7 @@ function endEscape(list) {
   $("pause").classList.add("hide");
   if (document.exitPointerLock) document.exitPointerLock();
   const me = list.includes(player);
+  musPlay(player.role === "runner" && me ? "victory" : "defeat");
   $("endt").textContent = "🚤 ESCAPED BY BOAT!";
   $("endp").textContent =
     `${list.map((e) => e.name).join(", ")} sailed away from the island.` +
@@ -9061,6 +9105,7 @@ function freeCaptive(r, by) {
   popText("FREE!", r.pos.x, 2.8, r.pos.z, "#6fe08a", 1.2);
   msg(`🔓 ${by.name} rescued ${r.name}!`);
   beep(700, 0.3, "sine", 0.08, 300);
+  say(r, THANKS);
   if (r.hum) statusTo(r, "🔓 You are FREE — run!", 3);
 }
 function cough(e) {
@@ -9366,6 +9411,7 @@ function endRescue() {
   if (JAIL.life) {
     JAIL.life.g.position.y = 0.25;
   }
+  musPlay(!isCh && player.alive ? "victory" : "defeat");
   showEnd(
     "🛟 THE LIFEBOAT GOT AWAY — RUNNERS WIN",
     `The island is under water. ${free.map((e) => e.name).join(", ")} ${free.length > 1 ? "were" : "was"} still free and escaped on the lifeboat.` +
@@ -9377,7 +9423,7 @@ function endRescue() {
   );
 }
 /* ================= background sound: surf + a light island tune (all generated, no files) ================= */
-const SNDV = { ocean: 0.7, rain: 0.7, notif: 0.7 };
+const SNDV = { ocean: 0.7, rain: 0.7, notif: 0.7, music: 0.8, voice: 0.8 };
 try {
   Object.assign(SNDV, JSON.parse(localStorage.getItem("ic_snd") || "{}"));
 } catch (e) {}
@@ -9389,6 +9435,371 @@ const BGM = {
   oceanLp: null,
   rain: null,
 };
+/* ---- music tracks (public/music/): menu loop, in-game loop, one-shot victory / defeat ---- */
+const MUS = { cur: "", a: {} };
+function musMake(name, loop, vol) {
+  const probe = document.createElement("audio"),
+    ogg = probe.canPlayType && probe.canPlayType('audio/ogg; codecs="vorbis"');
+  const a = new Audio(`music/${name}.${ogg ? "ogg" : "mp3"}`);
+  a.loop = loop;
+  a.preload = "auto";
+  a._v = vol;
+  a.volume = vol * SNDV.music;
+  MUS.a[name] = a;
+}
+musMake("menu", true, 0.5);
+musMake("ingame", true, 0.42);
+musMake("victory", false, 0.7);
+musMake("defeat", false, 0.7);
+/* ---- YOUR hit sound: replace public/music/hit.mp3 with your own file (keep the name hit.mp3,
+   or delete hit.mp3 and use hit.ogg / hit.wav instead). Plays when a chaser beats a runner. ---- */
+const HIT = {
+  a: new Audio(),
+  i: 0,
+  last: 0,
+  files: ["music/hit.mp3", "music/hit.ogg", "music/hit.wav"],
+};
+HIT.a.preload = "auto";
+HIT.a.addEventListener("error", () => {
+  HIT.i++;
+  if (HIT.i < HIT.files.length) {
+    HIT.a.src = HIT.files[HIT.i];
+    HIT.a.load();
+  }
+});
+HIT.a.src = HIT.files[0];
+function voiceFile(name) {
+  const v = {
+    a: new Audio(),
+    i: 0,
+    files: [`music/${name}.mp3`, `music/${name}.ogg`, `music/${name}.wav`],
+  };
+  v.a.preload = "auto";
+  v.a.addEventListener("error", () => {
+    v.i++;
+    if (v.i < v.files.length) {
+      v.a.src = v.files[v.i];
+      v.a.load();
+    }
+  });
+  v.a.src = v.files[0];
+  return v;
+}
+/* ---- more of YOUR voice files (same deal: replace the .mp3 in public/music/, or use .ogg/.wav):
+   thanks.mp3 = a rescued runner thanks their rescuer - comehere.mp3 = a chaser who has been
+   chasing for 4+ seconds shouts it every 4 s - jiggle.mp3 = you wiggling the stick / mashing jump ---- */
+const THANKS = voiceFile("thanks"),
+  COME = voiceFile("comehere"),
+  JIG = voiceFile("jiggle");
+const SLIP = voiceFile("slip"),
+  HAH = voiceFile("hah"); // slip.mp3 = anyone slips - hah.mp3 = the chaser laughs when he catches a runner
+function say(e, v, vol = 1) {
+  const ok = playVoiceAt(v.a, e, vol);
+  const d = v.a.duration;
+  e.sayT = isFinite(d) && d > 0 ? Math.min(4, d) : 1.2;
+  return ok;
+}
+/* ---- the beat loop: your hit.mp3 (3-4 s) keeps looping while a runner is being beaten ---- */
+const BEAT = { e: null, last: 0 };
+function playHit(r) {
+  if (!BGM.on || !r) return;
+  BEAT.e = r;
+  BEAT.last = performance.now();
+}
+function loopNodes(v) {
+  if (v._ln || !actx || !actx.createMediaElementSource) return;
+  try {
+    v._src = actx.createMediaElementSource(v.a);
+    v._gain = actx.createGain();
+    v._gain.gain.value = 0;
+    if (actx.createStereoPanner) {
+      v._pan = actx.createStereoPanner();
+      v._gain.connect(v._pan);
+      v._pan.connect(actx.destination);
+    } else v._gain.connect(actx.destination);
+    v._src.connect(v._gain);
+    v._ln = true;
+  } catch (e) {}
+}
+function loopPlay(v, e, vol) {
+  if (!BGM.on || !e) return;
+  v.a.loop = true;
+  loopNodes(v);
+  const sx = e.pos ? e.pos.x : e.x,
+    sz = e.pos ? e.pos.z : e.z,
+    dx = camera.position.x - sx,
+    dz = camera.position.z - sz,
+    dist = hyp(dx, dz),
+    near = e === player;
+  const att = near ? 1 : 1 / (1 + (dist / 16) * (dist / 16));
+  if (att < 0.03) {
+    loopStop(v);
+    return;
+  }
+  let dop = 1;
+  if (!near && dist > 1) {
+    const sv = velOf(e.pos ? e : null),
+      lv = velOf(player),
+      vr = ((sv[0] - lv[0]) * dx + (sv[1] - lv[1]) * dz) / dist;
+    dop = clamp(1 + vr / SND_C, 0.7, 1.45);
+  }
+  v.a.playbackRate = dop;
+  v.a.preservesPitch = false;
+  const vv = Math.min(1, att * vol * (SNDV.voice != null ? SNDV.voice : 0.8));
+  if (v._gain) {
+    v._gain.gain.value = vv;
+    if (v._pan)
+      v._pan.pan.value = near
+        ? 0
+        : clamp(
+            (-dx * Math.cos(camYaw) + dz * Math.sin(camYaw)) /
+              Math.max(dist, 4),
+            -1,
+            1,
+          ) * 0.9;
+  } else v.a.volume = vv;
+  if (v.a.paused) {
+    const pr = v.a.play();
+    if (pr && pr.catch) pr.catch(() => {});
+  }
+}
+function loopStop(v, reset) {
+  if (!v.a.paused) v.a.pause();
+  if (reset)
+    try {
+      v.a.currentTime = 0;
+    } catch (e) {}
+  if (v._gain) v._gain.gain.value = 0;
+}
+function beatTick() {
+  const v = HIT;
+  if (!BEAT.e || (phase !== "game" && phase !== "lobby")) {
+    loopStop(v);
+    return;
+  }
+  const e = BEAT.e,
+    age = performance.now() - BEAT.last;
+  const near = chasers.some(
+    (c) =>
+      c.alive &&
+      hyp(c.pos.x - e.pos.x, c.pos.z - e.pos.z) < 2.9 &&
+      Math.abs(c.pos.y - e.pos.y) < 2.2,
+  );
+  if (age > 1100 || (!near && age > 300)) {
+    BEAT.e = null;
+    loopStop(v);
+    return;
+  } // the beating stopped: the sound stops at once
+  loopPlay(v, e, 0.95);
+}
+function chaseTick(dt) {
+  // only a LONG chase: 8 s of closing in on the same runner, then "come here" every 4 s
+  if (phase !== "game") return;
+  for (const c of chasers) {
+    if (!c.alive || c.stun) {
+      c.chaseT = 0;
+      continue;
+    }
+    let best =
+        c.ai &&
+        c.ai.tgt &&
+        c.ai.tgt.role === "runner" &&
+        c.ai.tgt.alive &&
+        !c.ai.tgt.cap
+          ? c.ai.tgt
+          : null,
+      bd = best ? hyp(best.pos.x - c.pos.x, best.pos.z - c.pos.z) : 1e9;
+    if (!best)
+      for (const r of ents)
+        if (r.role === "runner" && r.alive && !r.cap && r.raft == null) {
+          const d = hyp(r.pos.x - c.pos.x, r.pos.z - c.pos.z);
+          if (d < bd) {
+            bd = d;
+            best = r;
+          }
+        }
+    let toward = false;
+    if (best && bd > 0.5) {
+      const sv = velOf(c);
+      toward =
+        (sv[0] * (best.pos.x - c.pos.x) + sv[1] * (best.pos.z - c.pos.z)) / bd >
+        1.5;
+    }
+    if (best && bd < 14 && bd > 2.0 && c.moving > 4.2 && toward) {
+      c.chaseT = (c.chaseT || 0) + dt;
+      c.chaseOff = 0;
+      c.comeT = (c.comeT || 0) - dt;
+      if (c.chaseT >= 8 && c.comeT <= 0) {
+        say(c, COME);
+        c.comeT = 4;
+      }
+    } else {
+      c.chaseOff = (c.chaseOff || 0) + dt;
+      if (c.chaseOff > 0.75) c.chaseT = 0;
+      c.comeT = 0;
+    }
+  }
+}
+const JIGS = { dir: 0, rev: [], lastRev: 0 };
+function jigTick() {
+  // ONLY continuous left-right wiggling: the sound starts, stops 1 s after you let go, and restarts from the beginning
+  const v = JIG,
+    p = player;
+  if (!p || phase !== "game" || p.role !== "runner") {
+    loopStop(v, true);
+    return;
+  }
+  const now = performance.now();
+  const dir =
+      (keys.KeyD || keys.ArrowRight ? 1 : 0) -
+      (keys.KeyA || keys.ArrowLeft ? 1 : 0) +
+      joy.x,
+    sg = dir > 0.3 ? 1 : dir < -0.3 ? -1 : 0;
+  if (sg) {
+    if (JIGS.dir && sg !== JIGS.dir) {
+      JIGS.rev.push(now);
+      JIGS.lastRev = now;
+    }
+    JIGS.dir = sg;
+  } // neutral frames between the two keys must not wipe the last direction
+  while (JIGS.rev.length && now - JIGS.rev[0] > 3000) JIGS.rev.shift();
+  if (JIGS.rev.length >= 3 && now - JIGS.lastRev < 1000) loopPlay(v, p, 0.8);
+  else loopStop(v, true);
+}
+/* ---- YOUR "help me" sound: replace public/music/help.mp3 with your own file (keep the name
+   help.mp3, or delete help.mp3 and use help.ogg / help.wav). A trapped or imprisoned runner
+   calls it every few seconds; it is positional - distance, stereo pan and Doppler pitch. ---- */
+const HELP = {
+  a: new Audio(),
+  i: 0,
+  last: 0,
+  files: ["music/help.mp3", "music/help.ogg", "music/help.wav"],
+};
+HELP.a.preload = "auto";
+HELP.a.addEventListener("error", () => {
+  HELP.i++;
+  if (HELP.i < HELP.files.length) {
+    HELP.a.src = HELP.files[HELP.i];
+    HELP.a.load();
+  }
+});
+HELP.a.src = HELP.files[0];
+function playVoiceAt(base, e, vol) {
+  // play a voice file as if it comes from entity e
+  if (!BGM.on || !e) return false;
+  const sx = e.pos ? e.pos.x : e.x,
+    sz = e.pos ? e.pos.z : e.z,
+    dx = camera.position.x - sx,
+    dz = camera.position.z - sz,
+    dist = hyp(dx, dz),
+    near = e === player;
+  const att = near ? 1 : 1 / (1 + (dist / 16) * (dist / 16));
+  if (att < 0.03) return false;
+  let dop = 1; // Doppler: pitch rises while the runner (or you) close in, falls as you separate
+  if (!near && dist > 1) {
+    const sv = velOf(e.pos ? e : null),
+      lv = velOf(player),
+      vr = ((sv[0] - lv[0]) * dx + (sv[1] - lv[1]) * dz) / dist;
+    dop = clamp(1 + vr / SND_C, 0.7, 1.45);
+  }
+  try {
+    const s = base.cloneNode();
+    s.playbackRate = dop;
+    s.preservesPitch = false;
+    s.webkitPreservesPitch = false;
+    const v = Math.min(1, att * vol * (SNDV.voice != null ? SNDV.voice : 0.8));
+    if (actx && actx.createMediaElementSource) {
+      if (actx.state === "suspended") actx.resume();
+      const src = actx.createMediaElementSource(s),
+        g = actx.createGain();
+      g.gain.value = v;
+      let out = g;
+      if (actx.createStereoPanner && !near) {
+        const pn = actx.createStereoPanner();
+        pn.pan.value =
+          clamp(
+            (-dx * Math.cos(camYaw) + dz * Math.sin(camYaw)) /
+              Math.max(dist, 4),
+            -1,
+            1,
+          ) * 0.9;
+        g.connect(pn);
+        out = pn;
+      }
+      src.connect(g);
+      out.connect(actx.destination);
+      s.addEventListener("ended", () => {
+        try {
+          src.disconnect();
+          g.disconnect();
+        } catch (err) {}
+      });
+    } else s.volume = v;
+    const pr = s.play();
+    if (pr && pr.catch) pr.catch(() => {});
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+function helpTick(dt) {
+  // trapped (net / pit / bear trap / hanging) or down, carried or tied in the prison: the runner calls for help
+  if (phase !== "game") return;
+  for (const e of ents) {
+    if (e.role !== "runner" || e.role === "decoy") continue;
+    const caught =
+      e.cap === "carried" ||
+      e.cap === "down" ||
+      (e.cap === "tied" && e.capT >= 30) ||
+      (e.stun &&
+        (e.stun.type === "net" ||
+          e.stun.type === "pit" ||
+          e.stun.type === "bear" ||
+          e.stun.type === "hang"));
+    if (
+      !caught ||
+      (!e.alive && e.cap !== "down" && e.cap !== "tied" && e.cap !== "carried")
+    ) {
+      e.helpT = 0;
+      continue;
+    }
+    e.helpT = (e.helpT || 0) - dt;
+    if (e.helpT <= 0) {
+      e.helpT = 3.5 + rnd(2.5);
+      const now = performance.now();
+      if (now - HELP.last < 1200) continue; // one call at a time
+      if (playVoiceAt(HELP.a, e, 1)) HELP.last = now;
+      if (hyp(camera.position.x - e.pos.x, camera.position.z - e.pos.z) < 45) {
+        const d = HELP.a.duration;
+        e.sayT = isFinite(d) && d > 0 ? Math.min(4, d) : 1.2;
+        popText("HELP ME!", e.pos.x, e.pos.y + 2.6, e.pos.z, "#ffd23f", 1.1);
+      }
+    }
+  }
+}
+function musApply() {
+  for (const k in MUS.a) {
+    const a = MUS.a[k];
+    a.volume = a._v * (SNDV.music != null ? SNDV.music : 0.8);
+    if (k !== MUS.cur && !a.paused) a.pause();
+  }
+  const a = MUS.a[MUS.cur];
+  if (a && BGM.on && !paused && !document.hidden) {
+    const pr = a.play();
+    if (pr && pr.catch) pr.catch(() => {});
+  }
+}
+function musPlay(k) {
+  MUS.cur = k || "";
+  const a = MUS.a[MUS.cur];
+  if (a && !a.loop) a.currentTime = 0;
+  musApply();
+}
+function musKick() {
+  if (phase === "menu") musPlay("menu");
+  else if (phase === "lobby" || phase === "game") musPlay("ingame");
+}
+addEventListener("visibilitychange", musApply);
 function startBgm() {
   if (BGM.started) return;
   try {
@@ -9463,7 +9874,7 @@ function bgmTick() {
 function setSoundUi() {
   const b = $("sndbtn");
   if (b) b.textContent = BGM.on ? "🔊 Sound" : "🔇 Sound";
-  for (const k of ["ocean", "rain", "notif"]) {
+  for (const k of ["ocean", "rain", "notif", "music", "voice"]) {
     const r = $("sv_" + k);
     if (r) r.value = Math.round(SNDV[k] * 100);
   }
@@ -9474,13 +9885,20 @@ function toggleSound() {
   BGM.on = !BGM.on;
   startBgm();
   if (BGM.master) BGM.master.gain.value = BGM.on ? 1 : 0;
+  musApply();
   setSoundUi();
 }
-addEventListener("pointerdown", startBgm);
+addEventListener("pointerdown", () => {
+  startBgm();
+  musKick();
+});
 addEventListener("keydown", (ev) => {
   if (ev.code === "KeyM" && document.activeElement.tagName !== "INPUT")
     toggleSound();
-  else startBgm();
+  else {
+    startBgm();
+    musKick();
+  }
 });
 if ($("sndbtn")) {
   const stop = (ev) => ev.stopPropagation();
@@ -9497,7 +9915,7 @@ if ($("sndbtn")) {
     "keydown",
   ])
     $("sndpanel").addEventListener(n, stop);
-  for (const k of ["ocean", "rain", "notif"])
+  for (const k of ["ocean", "rain", "notif", "music", "voice"])
     $("sv_" + k).addEventListener("input", (ev) => {
       SNDV[k] = ev.target.value / 100;
       try {
@@ -9507,6 +9925,7 @@ if ($("sndbtn")) {
         chimeT = 0;
         chime();
       }
+      if (k === "music") musApply();
     });
   $("sv_mute").addEventListener("change", () => toggleSound());
   setSoundUi();
@@ -10529,6 +10948,7 @@ function updateWeather(dt) {
         continue;
       e.stun = { type: "slip", t: 1.1 };
       e.slipCd = 7;
+      playVoiceAt(SLIP.a, e, 1);
       e.kx = Math.sin(e.yaw) * 7;
       e.kz = Math.cos(e.yaw) * 7;
       e.atk = null;
@@ -11449,6 +11869,15 @@ function endFinal(chWon, why) {
   if (NET.host) netEnd("f", [chWon ? 1 : 0, why]);
   const crew = raftCrew(),
     isCh = player.role === "chaser";
+  musPlay(
+    chWon
+      ? isCh
+        ? "victory"
+        : "defeat"
+      : !isCh && player.raft != null
+        ? "victory"
+        : "defeat",
+  );
   if (chWon) endTaunt();
   if (chWon)
     showEnd(
@@ -12058,9 +12487,11 @@ function menuScene(dt, stop) {
 }
 function frame(now, bg) {
   if (!bg) requestAnimationFrame(frame);
-  const dt = Math.max(0, Math.min(0.05, (now - lastT) / 1000));
+  const rawDt = (now - lastT) / 1000,
+    dt = Math.max(0, Math.min(0.05, rawDt));
   lastT = now;
   clock += dt;
+  qTick(rawDt);
   if (phase === "menu") {
     menuA += dt * 0.1;
     menuScene(dt);
@@ -12073,6 +12504,10 @@ function frame(now, bg) {
     return;
   }
   if (NET.guest) netGuestFrame(dt);
+  helpTick(dt);
+  beatTick();
+  chaseTick(dt);
+  jigTick();
   if (phase === "lobby") {
     lobbyT -= dt;
     if (lobbyT <= 0) {
@@ -12807,7 +13242,8 @@ function netPredict(e, dt) {
 }
 function netGuestFrame(dt) {
   for (const e of ents) {
-    const m = NET.mir.get(e.nid);
+    const m = NET.mir.get(e.nid),
+      capWas = e.cap;
     if (m) {
       if (e.isPlayer) {
         netApplyEnt(e, m, dt, false, true);
@@ -12828,6 +13264,24 @@ function netGuestFrame(dt) {
         }
       } else netApplyEnt(e, m, dt);
     }
+    if (capWas === "tied" && !e.cap && e.role === "runner") say(e, THANKS);
+    if (
+      capWas !== "down" &&
+      capWas !== "tied" &&
+      (e.cap === "down" || e.cap === "tied") &&
+      e.role === "runner"
+    ) {
+      let bc = null,
+        bd = 1e9;
+      for (const c of chasers) {
+        const d = hyp(c.pos.x - e.pos.x, c.pos.z - e.pos.z);
+        if (d < bd) {
+          bd = d;
+          bc = c;
+        }
+      }
+      if (bc) say(bc, HAH);
+    }
     if (e.stun && e.stun.type === "net" && !e.netMesh) {
       e.netMesh = new THREE.Mesh(
         new THREE.IcosahedronGeometry(1.05, 1),
@@ -12839,6 +13293,7 @@ function netGuestFrame(dt) {
   }
   if (player) {
     if (NET.myHp !== undefined && player.hp < NET.myHp - 0.5) {
+      playHit(player);
       $("flash").style.opacity = 1;
       setTimeout(() => ($("flash").style.opacity = 0), 160);
       shake = 0.35;
@@ -13164,6 +13619,7 @@ function netConnect(first) {
 }
 function netAbort(why) {
   phase = "end";
+  musPlay("");
   $("pause").classList.add("hide");
   $("paused").classList.add("hide");
   if (document.exitPointerLock) document.exitPointerLock();
@@ -13445,6 +13901,20 @@ window.__game = {
     return cine;
   },
   BGM,
+  MUS,
+  HIT,
+  HELP,
+  THANKS,
+  COME,
+  JIG,
+  SLIP,
+  HAH,
+  BEAT,
+  Q,
+  JIGS,
+  playHit,
+  playVoiceAt,
+  say,
   get shipGone() {
     return shipGone;
   },
@@ -13541,6 +14011,7 @@ window.__game = {
   ents,
   traps,
   items,
+  keys,
   get phase() {
     return phase;
   },
