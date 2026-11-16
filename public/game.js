@@ -4949,7 +4949,7 @@ function start0(role, mp) {
     if (p) spawnItem(t, p.x, p.z);
   }
   phase = "lobby";
-  musPlay("ingame");
+  musPlay("");
   $("pause").classList.remove("hide");
   const others = chasers
     .filter((c) => !c.isPlayer)
@@ -9423,7 +9423,14 @@ function endRescue() {
   );
 }
 /* ================= background sound: surf + a light island tune (all generated, no files) ================= */
-const SNDV = { ocean: 0.7, rain: 0.7, notif: 0.7, music: 0.8, voice: 0.8 };
+const SNDV = {
+  ocean: 0.7,
+  rain: 0.7,
+  notif: 0.7,
+  music: 0.8,
+  voice: 0.8,
+  come: 0.8,
+};
 try {
   Object.assign(SNDV, JSON.parse(localStorage.getItem("ic_snd") || "{}"));
 } catch (e) {}
@@ -9448,9 +9455,8 @@ function musMake(name, loop, vol) {
   MUS.a[name] = a;
 }
 musMake("menu", true, 0.5);
-musMake("ingame", true, 0.42);
 musMake("victory", false, 0.7);
-musMake("defeat", false, 0.7);
+musMake("defeat", false, 0.7); // menu + endings only: no music inside the game
 /* ---- YOUR hit sound: replace public/music/hit.mp3 with your own file (keep the name hit.mp3,
    or delete hit.mp3 and use hit.ogg / hit.wav instead). Plays when a chaser beats a runner. ---- */
 const HIT = {
@@ -9494,7 +9500,7 @@ const THANKS = voiceFile("thanks"),
 const SLIP = voiceFile("slip"),
   HAH = voiceFile("hah"); // slip.mp3 = anyone slips - hah.mp3 = the chaser laughs when he catches a runner
 function say(e, v, vol = 1) {
-  const ok = playVoiceAt(v.a, e, vol);
+  const ok = playVoiceAt(v.a, e, vol, v === COME ? "come" : "voice");
   const d = v.a.duration;
   e.sayT = isFinite(d) && d > 0 ? Math.min(4, d) : 1.2;
   return ok;
@@ -9645,10 +9651,18 @@ function jigTick() {
   // ONLY continuous left-right wiggling: the sound starts, stops 1 s after you let go, and restarts from the beginning
   const v = JIG,
     p = player;
-  if (!p || phase !== "game" || p.role !== "runner") {
+  if (
+    !p ||
+    phase !== "game" ||
+    p.role !== "runner" ||
+    p.cap ||
+    (p.stun && STUCK.includes(p.stun.type)) ||
+    !(p.moving > 5.5)
+  ) {
     loopStop(v, true);
+    JIGS.rev.length = 0;
     return;
-  }
+  } // only while running free - never tied in prison or caught in a trap
   const now = performance.now();
   const dir =
       (keys.KeyD || keys.ArrowRight ? 1 : 0) -
@@ -9663,8 +9677,8 @@ function jigTick() {
     JIGS.dir = sg;
   } // neutral frames between the two keys must not wipe the last direction
   while (JIGS.rev.length && now - JIGS.rev[0] > 3000) JIGS.rev.shift();
-  if (JIGS.rev.length >= 3 && now - JIGS.lastRev < 1000) loopPlay(v, p, 0.8);
-  else loopStop(v, true);
+  if (JIGS.rev.length >= 3 && now - JIGS.lastRev < 500) loopPlay(v, p, 0.8);
+  else loopStop(v, true); // stops 0.5 s after the wiggling stops
 }
 /* ---- YOUR "help me" sound: replace public/music/help.mp3 with your own file (keep the name
    help.mp3, or delete help.mp3 and use help.ogg / help.wav). A trapped or imprisoned runner
@@ -9684,7 +9698,7 @@ HELP.a.addEventListener("error", () => {
   }
 });
 HELP.a.src = HELP.files[0];
-function playVoiceAt(base, e, vol) {
+function playVoiceAt(base, e, vol, key) {
   // play a voice file as if it comes from entity e
   if (!BGM.on || !e) return false;
   const sx = e.pos ? e.pos.x : e.x,
@@ -9707,7 +9721,10 @@ function playVoiceAt(base, e, vol) {
     s.playbackRate = dop;
     s.preservesPitch = false;
     s.webkitPreservesPitch = false;
-    const v = Math.min(1, att * vol * (SNDV.voice != null ? SNDV.voice : 0.8));
+    const v = Math.min(
+      1,
+      att * vol * (SNDV[key || "voice"] != null ? SNDV[key || "voice"] : 0.8),
+    );
     if (actx && actx.createMediaElementSource) {
       if (actx.state === "suspended") actx.resume();
       const src = actx.createMediaElementSource(s),
@@ -9797,7 +9814,7 @@ function musPlay(k) {
 }
 function musKick() {
   if (phase === "menu") musPlay("menu");
-  else if (phase === "lobby" || phase === "game") musPlay("ingame");
+  else if (phase === "lobby" || phase === "game") musPlay("");
 }
 addEventListener("visibilitychange", musApply);
 function startBgm() {
@@ -9874,7 +9891,7 @@ function bgmTick() {
 function setSoundUi() {
   const b = $("sndbtn");
   if (b) b.textContent = BGM.on ? "🔊 Sound" : "🔇 Sound";
-  for (const k of ["ocean", "rain", "notif", "music", "voice"]) {
+  for (const k of ["ocean", "rain", "notif", "music", "voice", "come"]) {
     const r = $("sv_" + k);
     if (r) r.value = Math.round(SNDV[k] * 100);
   }
@@ -9915,7 +9932,7 @@ if ($("sndbtn")) {
     "keydown",
   ])
     $("sndpanel").addEventListener(n, stop);
-  for (const k of ["ocean", "rain", "notif", "music", "voice"])
+  for (const k of ["ocean", "rain", "notif", "music", "voice", "come"])
     $("sv_" + k).addEventListener("input", (ev) => {
       SNDV[k] = ev.target.value / 100;
       try {
@@ -13901,6 +13918,7 @@ window.__game = {
     return cine;
   },
   BGM,
+  SNDV,
   MUS,
   HIT,
   HELP,
